@@ -1,0 +1,14 @@
+shader "pipelines/standard.shd"
+backface_culling(true)
+layer "default"
+emission(0.000000)
+metallic(0.920000)
+roughness(0.950000)
+alpha_ref(0.300000)
+defines {}
+color { 1.000000, 1.000000, 1.000000, 1.000000 }
+texture "/models/earth/textures/tmp9trhdgqy.png"
+texture "/models/earth/textures/tmp9thsnwec.png"
+texture "/"
+texture "/"
+layer "default"

@@ -1,35 +1,55 @@
+#include "engine/crc32.h"
 #include "engine/engine.h"
+#include "engine/lua_wrapper.h"
 #include "engine/plugin.h"
+#include "engine/prefab.h"
 #include "engine/reflection.h"
 #include "engine/resource_manager.h"
 #include "engine/universe.h"
 #include "gui/gui_scene.h"
 #include "gui/gui_system.h"
+#include "lua_script/lua_script_system.h"
 #include "renderer/model.h"
 #include "renderer/render_scene.h"
 
 using namespace Lumix;
 
 static const ComponentType MODEL_INSTANCE_TYPE = Reflection::getComponentType("model_instance");
+static const ComponentType LUA_SCRIPT_TYPE = Reflection::getComponentType("lua_script");
 static const ComponentType GUI_BUTTON_TYPE = Reflection::getComponentType("gui_button");
 
 struct Extension {
 	enum class Type {
 		SOLAR_PANEL,
-		AIR_RECYCLER
+		AIR_RECYCLER,
+		TOILET,
+		SLEEPING_QUARTER,
+
+		NONE
 	};
+	u32 id;
 	EntityPtr entity;
 	Type type;
+	float build_progress = 0.f;
 };
 
 struct CrewMember {
+	u32 id;
+	StaticString<128> name;
+	enum State {
+		IDLE,
+		BUILDING
+	} state = IDLE;
+	u32 subject = 0xffFFffFF;
 };
 
 struct Module {
 	Module(IAllocator& allocator) : extensions(allocator) {}
 
+	u32 id;
 	EntityRef entity;
 	Array<Extension*> extensions;
+	float build_progress = 0.f;
 };
 
 struct Stats {
@@ -62,20 +82,29 @@ struct SpaceStation {
 };
 
 struct Assets {
-	Path module;
-	Path solar_panel;
+	PrefabResource* module_2 = nullptr;
+	PrefabResource* module_3 = nullptr;
+	PrefabResource* module_4 = nullptr;
+	PrefabResource* solar_panel = nullptr;
 };
 
 struct Game : IPlugin {
-	Game(Engine& engine) 
-		: m_engine(engine) 
+	Game(Engine& engine)
+		: m_engine(engine)
 	{
-		initAssets();
+		// TODO this does not work if the asset is not precompiled at this time, since asset compiler is not hooked at this point
+		ResourceManagerHub& rm = m_engine.getResourceManager();
+		m_assets.module_2 = rm.load<PrefabResource>(Path("prefabs/module_2.fab"));
+		m_assets.module_3 = rm.load<PrefabResource>(Path("prefabs/module_3.fab"));
+		m_assets.module_4 = rm.load<PrefabResource>(Path("prefabs/module_4.fab"));
+		m_assets.solar_panel = rm.load<PrefabResource>(Path("prefabs/solar_panel.fab"));
 	}
 
-	void initAssets() {
-		m_assets.module = "models/module.fbx";
-		m_assets.solar_panel = "models/solar_panel.fbx";
+	~Game() {
+		m_assets.module_2->getResourceManager().unload(*m_assets.module_2);
+		m_assets.module_3->getResourceManager().unload(*m_assets.module_3);
+		m_assets.module_4->getResourceManager().unload(*m_assets.module_4);
+		m_assets.solar_panel->getResourceManager().unload(*m_assets.solar_panel);
 	}
 
 	void createScenes(Universe& universe) override;
@@ -87,26 +116,192 @@ struct Game : IPlugin {
 	Engine& m_engine;
 };
 
-struct GUI {
-	EntityRef station_stats_panel;
-	EntityRef actions_panel;
-	EntityRef power_stat;
-	EntityRef heat_stat;
-	EntityRef air_stat;
-	EntityRef food_stat;
-	EntityRef water_stat;
-
-	EntityRef station_stats_icon;
-	EntityRef actions_icon;
-};
-
 struct GameScene : IScene {
 	GameScene(Game& game, Universe& universe) 
 		: m_game(game)
 		, m_universe(universe)
 		, m_station(game.m_engine.getAllocator())
 		, m_allocator(game.m_engine.getAllocator())
-	{}
+	{
+		lua_State* L = m_game.m_engine.getState();
+		LuaWrapper::createSystemClosure(L, "Game", this, "getStationStats", lua_getStationStats);
+		LuaWrapper::createSystemClosure(L, "Game", this, "getModule", lua_getModule);
+		LuaWrapper::createSystemClosure(L, "Game", this, "getCrew", lua_getCrew);
+		LuaWrapper::createSystemClosure(L, "Game", this, "assignBuilder", lua_assignBuilder);
+		LuaWrapper::createSystemClosure(L, "Game", this, "onGUIEvent", lua_onGUIEvent);
+	}
+
+	static const char* toString(Extension::Type type) {
+		switch (type) {
+			case Extension::Type::SOLAR_PANEL: return "solar_panel";
+			case Extension::Type::AIR_RECYCLER: return "air_recycler";
+			case Extension::Type::TOILET: return "toilet";
+			case Extension::Type::SLEEPING_QUARTER: return "sleeping_quarter";
+			default: ASSERT(false); return "unknown";
+		}
+	}
+
+	static int lua_onGUIEvent(lua_State* L) {
+		const char* event_name = LuaWrapper::checkArg<const char*>(L, 1);
+		GameScene* game = getClosureScene(L);
+		if (!game) return 0;
+
+		game->onGUIEvent(crc32(event_name));
+		return 0;
+	}
+
+	void onGUIEvent(u32 event_hash) {
+		static const u32 build_module_2_event = crc32("build_module_2");
+		static const u32 build_module_3_event = crc32("build_module_3");
+		static const u32 build_module_4_event = crc32("build_module_4");
+		static const u32 build_solar_panel_event = crc32("build_solar_panel");
+		static const u32 build_water_recycler_event = crc32("build_water_recycler");
+		static const u32 build_air_recycler_event = crc32("build_air_recycler");
+		if (event_hash == build_module_2_event) {
+			ASSERT(!m_build_preview.isValid());
+			EntityMap entity_map(m_allocator);
+			const bool created = m_game.m_engine.instantiatePrefab(m_universe, *m_game.m_assets.module_2, {0, 0, 0}, Quat::IDENTITY, 1.f, Ref(entity_map));
+			m_build_preview = entity_map.m_map[0];
+			m_build_prefab = m_game.m_assets.module_2;
+			m_build_ext_type = Extension::Type::NONE;
+			return;
+		}
+		if (event_hash == build_module_3_event) {
+			ASSERT(!m_build_preview.isValid());
+			EntityMap entity_map(m_allocator);
+			const bool created = m_game.m_engine.instantiatePrefab(m_universe, *m_game.m_assets.module_3, {0, 0, 0}, Quat::IDENTITY, 1.f, Ref(entity_map));
+			m_build_preview = entity_map.m_map[0];
+			m_build_prefab = m_game.m_assets.module_3;
+			m_build_ext_type = Extension::Type::NONE;
+			return;
+		}
+		if (event_hash == build_module_4_event) {
+			ASSERT(!m_build_preview.isValid());
+			EntityMap entity_map(m_allocator);
+			const bool created = m_game.m_engine.instantiatePrefab(m_universe, *m_game.m_assets.module_4, {0, 0, 0}, Quat::IDENTITY, 1.f, Ref(entity_map));
+			m_build_preview = entity_map.m_map[0];
+			m_build_prefab = m_game.m_assets.module_4;
+			m_build_ext_type = Extension::Type::NONE;
+			return;
+		}
+		if (event_hash == build_solar_panel_event) {
+			ASSERT(!m_build_preview.isValid());
+			EntityMap entity_map(m_allocator);
+			const bool created = m_game.m_engine.instantiatePrefab(m_universe, *m_game.m_assets.solar_panel, {0, 0, 0}, Quat::IDENTITY, 1.f, Ref(entity_map));
+			m_build_preview = entity_map.m_map[0];
+			m_build_prefab = m_game.m_assets.solar_panel;
+			m_build_ext_type = Extension::Type::SOLAR_PANEL;
+			return;
+		}
+	}
+
+	static void push(lua_State* L, Extension& ext) {
+		lua_newtable(L); // [ext]
+		LuaWrapper::setField(L, -1, "id", ext.id);
+		LuaWrapper::setField(L, -1, "entity", ext.entity);
+		LuaWrapper::setField(L, -1, "type", toString(ext.type));
+		LuaWrapper::setField(L, -1, "build_progress", ext.build_progress);
+	}
+
+	static int lua_assignBuilder(lua_State* L) {
+		const u32 obj_id = LuaWrapper::checkArg<u32>(L, 1);
+		const u32 crewmember_id = LuaWrapper::checkArg<u32>(L, 2);
+
+		GameScene* game = getClosureScene(L);
+		if (!game) return 0;
+
+		for (CrewMember& c : game->m_station.crew) {
+			if (c.id == crewmember_id) {
+				c.state = CrewMember::BUILDING;
+				c.subject = obj_id;
+				return 0;
+			}
+		}
+
+		logError("Game") << "Invalid crewmember in assignBuilder";
+
+		return 0;
+	}
+
+	static GameScene* getClosureScene(lua_State* L) {
+		const int index = lua_upvalueindex(1);
+		if (!LuaWrapper::isType<GameScene>(L, index)) {
+			logError("Lua") << "Invalid Lua closure";
+			ASSERT(false);
+			return nullptr;
+		}
+		return LuaWrapper::checkArg<GameScene*>(L, index);
+	}
+
+	static int lua_getCrew(lua_State* L) {
+		GameScene* game = getClosureScene(L);
+		if (!game) return 0;
+
+		LuaWrapper::DebugGuard guard(L, 1);
+		lua_newtable(L); // [crew]
+		for (const CrewMember& member : game->m_station.crew) {
+			lua_newtable(L); // [crew, member]
+			switch (member.state) {
+				case CrewMember::BUILDING: LuaWrapper::setField(L, -1, "state", "building"); break;
+				case CrewMember::IDLE: LuaWrapper::setField(L, -1, "state", "idle"); break;
+			}
+			LuaWrapper::setField(L, -1, "subject", member.subject);
+			LuaWrapper::setField(L, -1, "id", member.id);
+			LuaWrapper::setField(L, -1, "name", member.name.data);
+
+			const int idx = 1 + int(&member - game->m_station.crew.begin());
+			lua_rawseti(L, -2, idx); // [crew]
+		}
+
+		return 1;
+	}
+
+	static int lua_getModule(lua_State* L) {
+		const EntityRef e = LuaWrapper::checkArg<EntityRef>(L, 1);
+		GameScene* game = getClosureScene(L);
+		if (!game) return 0;
+
+		const int midx = game->m_station.modules.find([&](Module* m){ return m->entity == e; });
+		if (midx < 0) return 0;
+
+		LuaWrapper::DebugGuard guard(L, 1);
+		Module* m = game->m_station.modules[midx];
+		lua_newtable(L); // [module]
+		LuaWrapper::setField(L, -1, "id", m->id);
+		LuaWrapper::setField(L, -1, "entity", m->entity);
+		LuaWrapper::setField(L, -1, "build_progress", m->build_progress);
+		lua_newtable(L); // [module, exts]
+		lua_setfield(L, -2, "extensions"); // [module]
+		lua_getfield(L, -1, "extensions"); // [module, exts]
+
+		for (Extension*& ext : m->extensions) {
+			const int idx = 1 + int(&ext - m->extensions.begin());
+			push(L, *ext); // [module, exts, ext]
+			lua_rawseti(L, -2, idx); // [module, exts]
+		}
+		lua_pop(L, 1); // [module]
+
+		return 1;
+	}
+
+	static int lua_getStationStats(lua_State* L) {
+		GameScene* game = getClosureScene(L);
+		if (!game) return 0;
+
+		lua_newtable(L);
+		const Stats& stats = game->m_station.stats;
+		LuaWrapper::setField(L, -1, "power_cons", stats.consumption.power);
+		LuaWrapper::setField(L, -1, "power_prod", stats.production.power);
+		LuaWrapper::setField(L, -1, "heat_cons", stats.consumption.heat);
+		LuaWrapper::setField(L, -1, "heat_prod", stats.production.heat);
+		LuaWrapper::setField(L, -1, "water_cons", stats.consumption.water);
+		LuaWrapper::setField(L, -1, "water_prod", stats.production.water);
+		LuaWrapper::setField(L, -1, "food_cons", stats.consumption.food);
+		LuaWrapper::setField(L, -1, "food_prod", stats.production.food);
+		LuaWrapper::setField(L, -1, "air_cons", stats.consumption.air);
+		LuaWrapper::setField(L, -1, "air_prod", stats.production.air);
+		return 1;
+	}
 
 	IPlugin& getPlugin() const override { return m_game; }
 	struct Universe& getUniverse() override { return m_universe; }
@@ -121,34 +316,30 @@ struct GameScene : IScene {
 	}
 
 	void initGUI() {
-		const EntityRef gui = (EntityRef)m_universe.findByName(INVALID_ENTITY, "gui");
-		
-		m_gui.station_stats_panel = (EntityRef)m_universe.findByName(gui, "ship_stats_panel");
-		const EntityRef vals = (EntityRef)m_universe.findByName(m_gui.station_stats_panel, "values");
-		m_gui.power_stat = findByName(vals, "power", "value");
-		m_gui.heat_stat = findByName(vals, "heat", "value");
-		m_gui.air_stat = findByName(vals, "air", "value");
-		m_gui.food_stat = findByName(vals, "food", "value");
-		m_gui.water_stat = findByName(vals, "water", "value");
-		
-		m_gui.actions_panel = (EntityRef)m_universe.findByName(gui, "actions_panel");
-
-
-		const EntityRef icons = (EntityRef)m_universe.findByName(gui, "icons");
-		m_gui.station_stats_icon = (EntityRef)m_universe.findByName(icons, "station");
-		m_gui.actions_icon = (EntityRef)m_universe.findByName(icons, "actions");
-
 		GUIScene* scene = (GUIScene*)m_universe.getScene(GUI_BUTTON_TYPE);
-		scene->buttonClicked().bind<&GameScene::onButtonClicked>(this);
+		scene->mousedButtonUnhandled().bind<&GameScene::onMouseButton>(this);
 
 		((GUISystem&)scene->getPlugin()).enableCursor(true);
 	}
 
 	void startGame() override {
-		Module* m = addModule();
-		addExtension(*m, Extension::Type::SOLAR_PANEL);
-		addExtension(*m, Extension::Type::AIR_RECYCLER);
-		m_station.crew.emplace();
+		m_camera = (EntityRef)m_universe.findByName(INVALID_ENTITY, "camera");
+		
+		Module* m = addModule(*m_game.m_assets.module_2);
+		m_universe.setRotation(m->entity, Quat::vec3ToVec3(Vec3(0, 1, 0), Vec3(0, 0, 1)));
+		m->build_progress = 1;
+		
+		const EntityPtr pin_e = m_universe.findByName(m->entity, "ext_0");
+		addExtension(*m, Extension::Type::SOLAR_PANEL, pin_e)->build_progress = 1;
+		addExtension(*m, Extension::Type::AIR_RECYCLER, INVALID_ENTITY)->build_progress = 1;
+		addExtension(*m, Extension::Type::TOILET, INVALID_ENTITY)->build_progress = 1;
+		addExtension(*m, Extension::Type::SLEEPING_QUARTER, INVALID_ENTITY)->build_progress = 1;
+		CrewMember& c0 = m_station.crew.emplace();
+		CrewMember& c1 = m_station.crew.emplace();
+		c0.id = ++id_generator;
+		c0.name = "Donald Trump";
+		c1.id = ++id_generator;
+		c1.name = "Alber Einstein";
 		initGUI();
 		m_is_game_started = true;
 	}
@@ -157,23 +348,106 @@ struct GameScene : IScene {
 		// TODO clean station
 		m_is_game_started = false;
 		GUIScene* scene = (GUIScene*)m_universe.getScene(GUI_BUTTON_TYPE);
-		scene->buttonClicked().unbind<&GameScene::onButtonClicked>(this);
+		scene->mousedButtonUnhandled().unbind<&GameScene::onMouseButton>(this);
 	}
 
-	void onButtonClicked(EntityRef button) {
-		GUIScene& scene = getGUIScene();
-		if (button == m_gui.station_stats_icon) {
-			const bool enabled = scene.isRectEnabled(m_gui.station_stats_panel);
-			scene.enableRect(m_gui.station_stats_panel, !enabled);
-			scene.enableRect(m_gui.actions_panel, false);
-		}
-		if (button == m_gui.actions_icon) {
-			const bool enabled = scene.isRectEnabled(m_gui.actions_panel);
-			scene.enableRect(m_gui.actions_panel, !enabled);
-			scene.enableRect(m_gui.station_stats_panel, false);
+	void destroyChildren(EntityRef e) {
+		EntityPtr ch = m_universe.getFirstChild(e);
+		while (ch.isValid()) {
+			const EntityRef child = (EntityRef)ch;
+			const EntityPtr next = m_universe.getNextSibling(child);
+			destroyChildren(child);
+			m_universe.destroyEntity(child);
+			ch = next;
 		}
 	}
 
+	void selectModule(Module& m) {
+		m_selected_module = &m;
+		if (LuaScriptScene::IFunctionCall* call = getLuaScene().beginFunctionCall(m.entity, 0, "selected")) {
+			getLuaScene().endFunctionCall();
+		}
+	}
+
+	void selectModule(EntityRef e) {
+		for (Module* m : m_station.modules) {
+			if (m->entity == e) {
+				selectModule(*m);
+				return;
+			}
+
+			for (const Extension* ext : m->extensions) {
+				if (ext->entity == e) {
+					selectModule(*m);
+					return;
+				}
+			}
+		}
+	}
+	
+	Transform getNeighbourTransform(EntityRef hatch_a, EntityRef hatch_b, EntityRef module_b) const {
+		 Transform hatch_a_tr = m_universe.getTransform(hatch_a);
+		const Transform hatch_b_tr = m_universe.getTransform(hatch_b);
+		const Transform module_b_tr = m_universe.getTransform(module_b);
+
+		hatch_a_tr.rot = hatch_a_tr.rot * Quat(Vec3(0, 1, 0), PI);
+
+		const Transform rel = hatch_b_tr.inverted() * module_b_tr;
+		Transform res = hatch_a_tr * rel;
+		res.rot.normalize();
+		return res;
+	}
+
+	Transform getPinnedTransform(EntityRef hatch_a, EntityRef hatch_b, EntityRef module_b) const {
+		 Transform hatch_a_tr = m_universe.getTransform(hatch_a);
+		const Transform hatch_b_tr = m_universe.getTransform(hatch_b);
+		const Transform module_b_tr = m_universe.getTransform(module_b);
+
+		const Transform rel = hatch_b_tr.inverted() * module_b_tr;
+		Transform res = hatch_a_tr * rel;
+		res.rot.normalize();
+		return res;
+	}
+
+	void onMouseButton(bool down, int x, int y) {
+		const Viewport& vp = getRenderScene().getCameraViewport(m_camera);
+		DVec3 origin;
+		Vec3 dir;
+		vp.getRay(Vec2((float)x, (float)y), origin, dir);
+
+		if (m_build_preview.isValid()) {
+			float t;
+			if (getRayPlaneIntersecion(origin.toFloat(), dir, {0, 0, 0}, {0, 0, 1}, t)) {
+				const DVec3 p = origin + dir * t;
+				if (m_build_ext_type != Extension::Type::NONE) {
+					const Pin pin = getClosestPin(p, 5, "ext_");
+					if (pin.module) {
+						Extension* ext = addExtension(*pin.module, m_build_ext_type, pin.pin);
+						const Transform tr = getPinnedTransform((EntityRef)pin.pin, (EntityRef)m_build_preview, (EntityRef)ext->entity);
+						m_universe.setTransform((EntityRef)ext->entity, tr);
+					}
+				}
+				else {
+					const Pin pin = getClosestPin(p, 5, "hatch_");
+					if (pin.module) {
+						Module* m = addModule(*m_build_prefab);
+						const EntityRef hatch_b = (EntityRef)m_universe.findByName(m->entity, "hatch_0");
+						const Transform tr = getNeighbourTransform((EntityRef)pin.pin, hatch_b, m->entity);
+						m_universe.setTransform(m->entity, tr);
+					}
+				}
+			}
+			destroyChildren((EntityRef)m_build_preview);
+			m_universe.destroyEntity((EntityRef)m_build_preview);
+			m_build_preview = INVALID_ENTITY;
+		}
+
+		const RayCastModelHit hit = getRenderScene().castRay(origin, dir, INVALID_ENTITY);
+		if (hit.is_hit) {
+			selectModule((EntityRef)hit.entity);
+		}
+	}
+	
 	GUIScene& getGUIScene() {
 		return *(GUIScene*)m_universe.getScene(GUI_BUTTON_TYPE);
 	}
@@ -182,27 +456,43 @@ struct GameScene : IScene {
 		return *(RenderScene*)m_universe.getScene(MODEL_INSTANCE_TYPE);
 	}
 
-	Module* addModule() {
+	LuaScriptScene& getLuaScene() {
+		return *(LuaScriptScene*)m_universe.getScene(LUA_SCRIPT_TYPE);
+	}
+
+	Module* addModule(PrefabResource& prefab) {
 		Module* m = LUMIX_NEW(m_allocator, Module)(m_allocator);
-		m->entity = m_universe.createEntity({0, 0, 0}, {0, 0, 0, 1});
-		m_universe.createComponent(MODEL_INSTANCE_TYPE, m->entity);
-		const Path& p = m_game.m_assets.module;
-		getRenderScene().setModelInstancePath(m->entity, p);
+		m->id = ++id_generator;
+		EntityMap entity_map(m_allocator);
+		const bool created = m_game.m_engine.instantiatePrefab(m_universe, prefab, {0, 0, 0}, Quat::IDENTITY, 1.f, Ref(entity_map));
+		m->entity = (EntityRef)entity_map.m_map[0];
 		m_station.modules.push(m);
 		return m;
 	}
 
-	void addExtension(Module& module, Extension::Type type) {
-		Extension* e = LUMIX_NEW(m_allocator, Extension);
-		e->entity = m_universe.createEntity({0, 0, 0}, {0, 0, 0, 1});
-		m_universe.createComponent(MODEL_INSTANCE_TYPE, (EntityRef)e->entity);
+	Extension* addExtension(Module& module, Extension::Type type, EntityPtr pin_e) {
+		Extension* ext = LUMIX_NEW(m_allocator, Extension);
+		ext->id = ++id_generator;
+
 		switch (type) {
-			case Extension::Type::SOLAR_PANEL : getRenderScene().setModelInstancePath((EntityRef)e->entity, m_game.m_assets.solar_panel); break;
+			case Extension::Type::SOLAR_PANEL : {
+				EntityMap entity_map(m_allocator);
+				bool res = m_game.m_engine.instantiatePrefab(m_universe, *m_game.m_assets.solar_panel, {0, 0, 0}, Quat::IDENTITY, 1.f, Ref(entity_map));
+				ASSERT(res);
+				const EntityRef e = (EntityRef)entity_map.m_map[0];
+				ext->entity = e;
+				m_universe.setParent(pin_e, e);
+				m_universe.setLocalTransform(e, Transform::IDENTITY);
+				break;
+			}
 			case Extension::Type::AIR_RECYCLER : break;
+			case Extension::Type::TOILET : break;
+			case Extension::Type::SLEEPING_QUARTER: break;
 			default: ASSERT(false); break;
 		}
-		e->type = type;
-		module.extensions.push(e);
+		ext->type = type;
+		module.extensions.push(ext);
+		return ext;
 	}
 
 	void computeStats(float time_delta) {
@@ -212,11 +502,14 @@ struct GameScene : IScene {
 		stats.consumption = {};
 
 		for (const Module* m : m_station.modules) {
-			stats.volume += 100;
+			if (m->build_progress < 1) continue;
+			stats.volume += 40; // usable volume in m3
 			stats.consumption.heat += 10; // IR emission from the module itself
 			stats.production.heat += 5; // produced by necessary module electronics
 			stats.consumption.power += 7; // consumed by necessary module electronics
+			
 			for (Extension* ext : m->extensions) {
+				if (ext->build_progress < 1) continue;
 				switch (ext->type) {
 					case Extension::Type::AIR_RECYCLER:
 						stats.production.air = 2000;
@@ -231,47 +524,111 @@ struct GameScene : IScene {
 		for (CrewMember& c : m_station.crew) {
 			stats.production.heat += 100;
 			stats.consumption.air += 450; 
-			stats.consumption.water = 2;
+			stats.consumption.water = 4.5;
 			stats.consumption.food = 2700;
 		}
 	}
 
-	void updateGUI() {
-		const Stats& stats = m_station.stats;
-		GUIScene& scene = getGUIScene();
-		StaticString<256> tmp;
-		
-		tmp << int(stats.production.power - stats.consumption.power) << " kW (" 
-			<< int(stats.production.power) << " - " << int(stats.consumption.power) << ")";
-		scene.setText(m_gui.power_stat, tmp);
-	
-		tmp = "";
-		tmp << int(stats.production.heat - stats.consumption.heat) << " W (" 
-			<< int(stats.production.heat) << " - " << int(stats.consumption.heat) << ")";
-		scene.setText(m_gui.heat_stat, tmp);
-
-		tmp = "";
-		tmp << int(stats.production.air - stats.consumption.air) << " l/h (" 
-			<< int(stats.production.air) << " - " << int(stats.consumption.air) << ")";
-		scene.setText(m_gui.air_stat, tmp);
-
-		tmp = "";
-		tmp << int(stats.production.food - stats.consumption.food) << " kcal/day (" 
-			<< int(stats.production.food) << " - " << int(stats.consumption.food) << ")";
-		scene.setText(m_gui.food_stat, tmp);
-
-		tmp = "";
-		tmp << int(stats.production.water - stats.consumption.water) << " l/day (" 
-			<< int(stats.production.water) << " - " << int(stats.consumption.water) << ")";
-		scene.setText(m_gui.water_stat, tmp);
+	Module* getModule(EntityRef e) {
+		for (Module* m : m_station.modules) {
+			if (m->entity == e) return m;
+		}
+		return nullptr;
 	}
 
 	void update(float time_delta, bool paused) override {
 		if (paused) return;
 		if (!m_is_game_started) return;
 
+		for (CrewMember& c : m_station.crew) {
+			if (c.state == CrewMember::BUILDING) {
+				for (Module* m : m_station.modules) {
+					if (m->id == c.subject) {
+						m->build_progress += time_delta * 0.1f;
+						if (m->build_progress >= 1) {
+							m->build_progress  = 1;
+							c.state = CrewMember::IDLE;
+						}
+						break;
+					}
+					for (Extension* ext : m->extensions) {
+						if (ext->id == c.subject) {
+							ext->build_progress += time_delta * 0.1f;
+							if (ext->build_progress >= 1) {
+								ext->build_progress  = 1;
+								c.state = CrewMember::IDLE;
+							}
+							break;
+						}
+					}
+				}
+			}
+		}
+
 		computeStats(time_delta);
-		updateGUI();
+		updateBuildPreview();
+	}
+
+	struct Pin {
+		Module* module;
+		EntityPtr pin;
+	}; 
+
+	Pin getClosestPin(const DVec3& p, float max_dist, const char* prefix) {
+		EntityPtr closest_pin = INVALID_ENTITY;
+		Module* closest_module = nullptr;
+		float pin_dist = FLT_MAX;
+		for (Module* m : m_station.modules) {
+			if (m->build_progress < 1) continue;
+			for (EntityPtr ch = m_universe.getFirstChild(m->entity); ch.isValid(); ch = m_universe.getNextSibling((EntityRef)ch)) {
+				EntityRef child = (EntityRef)ch;
+				const char* name = m_universe.getEntityName(child);
+				if (startsWith(name, prefix)) {
+					const double d = (p - m_universe.getPosition(child)).squaredLength();
+					if (d < pin_dist) {
+						pin_dist = (float)d;
+						closest_pin = child;
+						closest_module = m;
+					}
+				}
+			}
+		}
+		if (pin_dist < max_dist * max_dist) {
+			return { closest_module, closest_pin };
+		}
+		return {};
+	}
+
+	void updateBuildPreview() {
+		if (!m_build_preview.isValid()) return;
+
+		const IVec2 mp = getGUIScene().getCursorPosition();
+
+		const Viewport& vp = getRenderScene().getCameraViewport(m_camera);
+		DVec3 origin;
+		Vec3 dir;
+		vp.getRay(Vec2((float)mp.x, (float)mp.y), origin, dir);
+
+		float t;
+		if (getRayPlaneIntersecion(origin.toFloat(), dir, {0, 0, 0}, {0, 0, 1}, t)) {
+			const DVec3 p = origin + dir * t;
+			const bool is_ext = m_build_ext_type != Extension::Type::NONE;
+			const Pin pin = getClosestPin(p, 5, is_ext ? "ext_" : "hatch_");
+			if (pin.module) {
+				if (is_ext) {
+					const Transform tr = getPinnedTransform((EntityRef)pin.pin, (EntityRef)m_build_preview, (EntityRef)m_build_preview);
+					m_universe.setTransform((EntityRef)m_build_preview, tr);
+					return;
+				}
+				
+				const EntityRef hatch_b = (EntityRef)m_universe.findByName((EntityRef)m_build_preview, "hatch_0");				
+				const Transform tr = getNeighbourTransform((EntityRef)pin.pin, hatch_b, (EntityRef)m_build_preview);
+				m_universe.setTransform((EntityRef)m_build_preview, tr);
+				return;
+			}
+
+			m_universe.setPosition((EntityRef)m_build_preview, p);
+		}
 	}
 
 	bool m_is_game_started = false;
@@ -279,7 +636,14 @@ struct GameScene : IScene {
 	Game& m_game;
 	Universe& m_universe;
 	SpaceStation m_station;
-	GUI m_gui;
+	EntityRef m_camera;
+	
+	EntityPtr m_build_preview = INVALID_ENTITY;
+	PrefabResource* m_build_prefab = nullptr;
+	Extension::Type m_build_ext_type = Extension::Type::NONE;
+
+	Module* m_selected_module = nullptr;
+	u32 id_generator = 0;
 };
 
 void Game::createScenes(Universe& universe) {

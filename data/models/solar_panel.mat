@@ -1,4 +1,14 @@
 shader "pipelines/standard.shd"
-texture ""
-texture ""
-texture ""
+backface_culling(true)
+layer "default"
+emission(0.000000)
+metallic(1.000000)
+roughness(0.600000)
+alpha_ref(0.300000)
+defines {}
+color { 0.000000, 0.007578, 0.020513, 1.000000 }
+texture "/"
+texture "/"
+texture "/"
+texture "/"
+layer "default"

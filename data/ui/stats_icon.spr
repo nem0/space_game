@@ -1,0 +1,6 @@
+type "simple"
+top(-842150451)
+bottom(-842150451)
+left(-842150451)
+right(-842150451)
+texture "ui/stats_icon.tga"
