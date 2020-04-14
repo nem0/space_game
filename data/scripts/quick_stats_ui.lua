@@ -1,8 +1,8 @@
-power = -1
-heat  = -1
-air  = -1
-water  = -1
-food  = -1
+power = {}
+heat  = {}
+air  = {}
+water  = {}
+food  = {}
 Editor.setPropertyType(this, "power", Editor.ENTITY_PROPERTY)
 Editor.setPropertyType(this, "heat", Editor.ENTITY_PROPERTY)
 Editor.setPropertyType(this, "air", Editor.ENTITY_PROPERTY)
@@ -16,20 +16,11 @@ local water_ui = 0
 local food_ui = 0
 
 function start()
-    local s = Lumix.Entity:new(this._universe, power)
-    power_ui = s:getComponent("gui_text")
-
-    s = Lumix.Entity:new(this._universe, heat)
-    heat_ui = s:getComponent("gui_text")
-
-    s = Lumix.Entity:new(this._universe, air)
-    air_ui = s:getComponent("gui_text")
-
-    s = Lumix.Entity:new(this._universe, water)
-    water_ui = s:getComponent("gui_text")
-
-    s = Lumix.Entity:new(this._universe, food)
-    food_ui = s:getComponent("gui_text")
+    power_ui = power.gui_text
+    heat_ui = heat.gui_text
+    air_ui = air.gui_text
+    water_ui = water.gui_text
+    food_ui = food.gui_text
 end
 
 function update()

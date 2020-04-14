@@ -1,8 +1,10 @@
 #include "engine/crc32.h"
 #include "engine/engine.h"
+#include "engine/input_system.h"
 #include "engine/lua_wrapper.h"
 #include "engine/plugin.h"
 #include "engine/prefab.h"
+#include "engine/profiler.h"
 #include "engine/reflection.h"
 #include "engine/resource_manager.h"
 #include "engine/universe.h"
@@ -24,6 +26,7 @@ struct Extension {
 		AIR_RECYCLER,
 		TOILET,
 		SLEEPING_QUARTER,
+		WATER_RECYCLER,
 
 		NONE
 	};
@@ -135,6 +138,7 @@ struct GameScene : IScene {
 		switch (type) {
 			case Extension::Type::SOLAR_PANEL: return "solar_panel";
 			case Extension::Type::AIR_RECYCLER: return "air_recycler";
+			case Extension::Type::WATER_RECYCLER: return "water_recycler";
 			case Extension::Type::TOILET: return "toilet";
 			case Extension::Type::SLEEPING_QUARTER: return "sleeping_quarter";
 			default: ASSERT(false); return "unknown";
@@ -157,6 +161,8 @@ struct GameScene : IScene {
 		static const u32 build_solar_panel_event = crc32("build_solar_panel");
 		static const u32 build_water_recycler_event = crc32("build_water_recycler");
 		static const u32 build_air_recycler_event = crc32("build_air_recycler");
+		static const u32 build_toilet_event = crc32("build_toilet");
+		static const u32 build_sleeping_quarter_event = crc32("build_sleeping_quarter");
 		if (event_hash == build_module_2_event) {
 			ASSERT(!m_build_preview.isValid());
 			EntityMap entity_map(m_allocator);
@@ -193,12 +199,22 @@ struct GameScene : IScene {
 			m_build_ext_type = Extension::Type::SOLAR_PANEL;
 			return;
 		}
+		if (event_hash == build_water_recycler_event) {
+			addExtension(*m_selected_module, Extension::Type::WATER_RECYCLER, INVALID_ENTITY);
+		}
+		if (event_hash == build_toilet_event) {
+			addExtension(*m_selected_module, Extension::Type::TOILET, INVALID_ENTITY);
+		}
+		if (event_hash == build_sleeping_quarter_event) {
+			addExtension(*m_selected_module, Extension::Type::SLEEPING_QUARTER, INVALID_ENTITY);
+		}
+		
 	}
 
 	static void push(lua_State* L, Extension& ext) {
 		lua_newtable(L); // [ext]
 		LuaWrapper::setField(L, -1, "id", ext.id);
-		LuaWrapper::setField(L, -1, "entity", ext.entity);
+		LuaWrapper::setField(L, -1, "entity", ext.entity.index);
 		LuaWrapper::setField(L, -1, "type", toString(ext.type));
 		LuaWrapper::setField(L, -1, "build_progress", ext.build_progress);
 	}
@@ -323,7 +339,9 @@ struct GameScene : IScene {
 	}
 
 	void startGame() override {
-		m_camera = (EntityRef)m_universe.findByName(INVALID_ENTITY, "camera");
+		m_angle = PI * 0.5f;
+		m_ref_point = (EntityRef)m_universe.findByName(INVALID_ENTITY, "ref_point");
+		m_camera = (EntityRef)m_universe.findByName(m_ref_point, "camera");
 		
 		Module* m = addModule(*m_game.m_assets.module_2);
 		m_universe.setRotation(m->entity, Quat::vec3ToVec3(Vec3(0, 1, 0), Vec3(0, 0, 1)));
@@ -410,14 +428,17 @@ struct GameScene : IScene {
 	}
 
 	void onMouseButton(bool down, int x, int y) {
+		PROFILE_FUNCTION();
 		const Viewport& vp = getRenderScene().getCameraViewport(m_camera);
 		DVec3 origin;
 		Vec3 dir;
 		vp.getRay(Vec2((float)x, (float)y), origin, dir);
+		const Transform ref_tr = m_universe.getTransform(m_ref_point);
+		const Vec3 N = ref_tr.rot.rotate(Vec3(0, 0, 1));
 
 		if (m_build_preview.isValid()) {
 			float t;
-			if (getRayPlaneIntersecion(origin.toFloat(), dir, {0, 0, 0}, {0, 0, 1}, t)) {
+			if (getRayPlaneIntersecion(origin.toFloat(), dir, ref_tr.pos.toFloat(), N, t)) {
 				const DVec3 p = origin + dir * t;
 				if (m_build_ext_type != Extension::Type::NONE) {
 					const Pin pin = getClosestPin(p, 5, "ext_");
@@ -466,6 +487,8 @@ struct GameScene : IScene {
 		EntityMap entity_map(m_allocator);
 		const bool created = m_game.m_engine.instantiatePrefab(m_universe, prefab, {0, 0, 0}, Quat::IDENTITY, 1.f, Ref(entity_map));
 		m->entity = (EntityRef)entity_map.m_map[0];
+		m_universe.setParent(m_ref_point, m->entity);
+		m_universe.setLocalPosition(m->entity, {0, 0, 0});
 		m_station.modules.push(m);
 		return m;
 	}
@@ -485,6 +508,7 @@ struct GameScene : IScene {
 				m_universe.setLocalTransform(e, Transform::IDENTITY);
 				break;
 			}
+			case Extension::Type::WATER_RECYCLER : break;
 			case Extension::Type::AIR_RECYCLER : break;
 			case Extension::Type::TOILET : break;
 			case Extension::Type::SLEEPING_QUARTER: break;
@@ -514,6 +538,9 @@ struct GameScene : IScene {
 					case Extension::Type::AIR_RECYCLER:
 						stats.production.air = 2000;
 						break;
+					case Extension::Type::WATER_RECYCLER:
+						stats.production.water = 10;
+						break;
 					case Extension::Type::SOLAR_PANEL:
 						stats.production.power += 120; // avg, max is 240
 						break;
@@ -524,8 +551,8 @@ struct GameScene : IScene {
 		for (CrewMember& c : m_station.crew) {
 			stats.production.heat += 100;
 			stats.consumption.air += 450; 
-			stats.consumption.water = 4.5;
-			stats.consumption.food = 2700;
+			stats.consumption.water += 4.5;
+			stats.consumption.food += 2700;
 		}
 	}
 
@@ -536,9 +563,74 @@ struct GameScene : IScene {
 		return nullptr;
 	}
 
+	void updateCamera(float time_delta) {
+		static bool is_rmb_down = false;
+		static bool is_forward = false;
+		static bool is_backward = false;
+		static bool is_left = false;
+		static bool is_right = false;
+		static bool is_fast = false;
+
+		Quat rot = m_universe.getRotation(m_camera);
+		const Vec3 up = rot.rotate(Vec3(0, 1, 0));
+		const Vec3 side = rot.rotate(Vec3(1, 0, 0));
+
+		const InputSystem& input = m_game.m_engine.getInputSystem();
+		const i32 count = input.getEventsCount();
+		const InputSystem::Event* events = input.getEvents();
+		for (i32 i = 0; i < count; ++i) {
+			const InputSystem::Event& e = events[i];
+			switch (e.type) {
+				case InputSystem::Event::BUTTON:
+					if (e.device->type == InputSystem::Device::MOUSE) {
+						if (e.data.button.key_id == 1) {
+							is_rmb_down = e.data.button.down;
+						}
+					}
+					else {
+						switch (e.data.button.key_id) {
+							case 'W': is_forward = e.data.button.down; break;
+							case 'S': is_backward = e.data.button.down; break;
+							case 'A': is_left = e.data.button.down; break;
+							case 'D': is_right = e.data.button.down; break;
+							case (u32)OS::Keycode::SHIFT: is_fast = e.data.button.down; break;
+						}
+					}
+					break;
+				case InputSystem::Event::AXIS:
+					if (is_rmb_down) {
+						const Quat drot = Quat(up, -e.data.axis.x * 0.003f);
+						const Quat drotx = Quat(side, -e.data.axis.y * 0.003f);
+						m_universe.setRotation(m_camera, (drotx * drot * rot).normalized());
+					}
+					break;
+			}
+		}
+
+		Vec3 move(0);
+		if (is_forward) move += Vec3(0, 0, -1);
+		if (is_backward) move += Vec3(0, 0, 1);
+		if (is_left) move += Vec3(-1, 0, 0);
+		if (is_right) move += Vec3(1, 0, 0);
+		if (move.squaredLength() > 0.1f) {
+			move = rot.rotate(move);
+			DVec3 p = m_universe.getPosition(m_camera);
+			p += move * time_delta * (is_fast ? 100.f : 10.f);
+			m_universe.setPosition(m_camera, p);
+		}
+	}
+
 	void update(float time_delta, bool paused) override {
 		if (paused) return;
 		if (!m_is_game_started) return;
+
+		m_angle = fmodf(m_angle + time_delta * 0.2f, PI * 2);
+		const float R = 6378e3 + 400e3;
+		const DVec3 ref_point_pos = {cosf(m_angle) * R, 0, sinf(m_angle) * R};
+		m_universe.setPosition(m_ref_point, ref_point_pos);
+		m_universe.setRotation(m_ref_point, Quat({0, 1, 0}, -m_angle + PI * 0.5f));
+
+		updateCamera(time_delta);
 
 		for (CrewMember& c : m_station.crew) {
 			if (c.state == CrewMember::BUILDING) {
@@ -608,9 +700,12 @@ struct GameScene : IScene {
 		DVec3 origin;
 		Vec3 dir;
 		vp.getRay(Vec2((float)mp.x, (float)mp.y), origin, dir);
+		const Transform ref_tr = m_universe.getTransform(m_ref_point);
+		const Vec3 N = ref_tr.rot.rotate(Vec3(0, 0, 1));
 
 		float t;
-		if (getRayPlaneIntersecion(origin.toFloat(), dir, {0, 0, 0}, {0, 0, 1}, t)) {
+
+		if (getRayPlaneIntersecion(origin.toFloat(), dir, ref_tr.pos.toFloat(), N, t)) {
 			const DVec3 p = origin + dir * t;
 			const bool is_ext = m_build_ext_type != Extension::Type::NONE;
 			const Pin pin = getClosestPin(p, 5, is_ext ? "ext_" : "hatch_");
@@ -637,6 +732,8 @@ struct GameScene : IScene {
 	Universe& m_universe;
 	SpaceStation m_station;
 	EntityRef m_camera;
+	EntityRef m_ref_point;
+	float m_angle = 0;
 	
 	EntityPtr m_build_preview = INVALID_ENTITY;
 	PrefabResource* m_build_prefab = nullptr;

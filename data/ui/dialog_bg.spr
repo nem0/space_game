@@ -1,0 +1,6 @@
+type "patch9"
+top(54)
+bottom(40)
+left(54)
+right(10)
+texture "ui/dialog_bg.tga"

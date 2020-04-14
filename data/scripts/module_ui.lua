@@ -1,5 +1,7 @@
-values_container_ui = -1
+values_container_ui = {}
+build_ext_pane = {}
 Editor.setPropertyType(this, "values_container_ui", Editor.ENTITY_PROPERTY) 
+Editor.setPropertyType(this, "build_ext_pane", Editor.ENTITY_PROPERTY) 
 
 _G.module_ui = this
 local refresh = -1
@@ -20,19 +22,25 @@ function ui_rect(v)
     ui_rect.top_points = v.top_points or 0
     ui_rect.top_relative = v.top_relative or 0
     
+    if v.scripts~= nil then
+        local s = e:createComponent("lua_script")
+        local lua_scene = LumixAPI.getScene(this._universe, "lua_script")
+        
+    end
+
     if v.update ~= nil then
         local s = e:createComponent("lua_script")
         local lua_scene = LumixAPI.getScene(this._universe, "lua_script")
-        LuaScript.addScript(lua_scene, e._entity, 0)
-        local evt = LuaScript.getEnvironment(this._universe, e._entity, 0)
+        LuaScript.addScript(lua_scene, e, 0)
+        local evt = LuaScript.getEnvironment(this._universe, e, 0)
         evt.update = function()
             v.update(e)
         end
-        LuaScript.rescan(this._universe, e._entity, 0)
+        LuaScript.rescan(this._universe, e, 0)
     end
 
-    for k, c in ipairs(v) do
-        c.parent = e
+    for i = #v, 1, -1 do
+        v[i].parent = e
     end
     return e
 end
@@ -41,9 +49,10 @@ function ui_text(t)
     local e = ui_rect(t)
     local ui_text = e:createComponent("gui_text")
     ui_text.text = t.text
-    ui_text.font = "editor/fonts/opensans-bold.ttf"
+    ui_text.font = "fonts/gotham_rounded_medium.ttf"
     ui_text.font_size = t.font_size or 20
     ui_text.horizontal_align = t.horizontal_align or 0
+    ui_text.vertical_align = t.vertical_align or 0
     return e
 end
 
@@ -64,12 +73,38 @@ function ui_button(v)
     if v.on_click ~= nil then
         local s = e:createComponent("lua_script")
         local lua_scene = LumixAPI.getScene(this._universe, "lua_script")
-        LuaScript.addScript(lua_scene, e._entity, 0)
-        local evt = LuaScript.getEnvironment(this._universe, e._entity, 0)
+        LuaScript.addScript(lua_scene, e, 0)
+        local evt = LuaScript.getEnvironment(this._universe, e, 0)
         evt.onButtonClicked = function()
             v.on_click(e)
         end
     end
+    return e
+end
+
+function grid(v)
+    local e = ui_rect(v)
+    local cols = v.cols
+    local y = 0
+    local col = 0
+    local col_spacing = v.col_spacing or 5
+
+    for _, c in ipairs(v) do
+        local r = c.gui_rect
+        r.left_relative = col / cols
+        r.left_points = col_spacing * 0.5
+        r.right_points = -col_spacing * 0.5
+        r.right_relative = (col + 1) / cols
+        r.bottom_relative = 0
+        r.top_points = y
+        r.bottom_points = y + v.row_height
+        col = col + 1
+        if col == cols then
+            y = y + v.row_height + v.row_spacing
+            col = 0
+        end
+    end
+
     return e
 end
 
@@ -126,6 +161,7 @@ function crew_popup(container, callback)
         right_relative = 0,
         right_points = 300,
         parent = container,
+        color = {1, 1, 1, 0.75},
         vlayout(join(
             { 
                 row_height = 20,
@@ -144,42 +180,66 @@ function crew_popup(container, callback)
 end
 
 local style = {
-    button_color = {1, 1, 1, 1},
+    button_color = {1, 0.5, 0, 1},
     dialog_bg_color = {1, 1, 1, 1},
-    button_hovered_color = {1, 1, 1, 0.5}
+    button_hovered_color = {0.75, 0.75, 0.75, 0.5}
 }
 
 function add_extension_button(v)
     return ui_button { 
         color = style.button_color,
         hovered_color = style.button_hovered_color,
-        ui_text { text = v.title }
+        on_click = function()
+            Game.onGUIEvent("build_" .. v.value)
+            refresh = v.module.entity
+        end,
+        ui_img { 
+            sprite = v.icon,
+            right_relative = 0,
+            right_points = 30,
+            left_poits = 5,
+            color = {0, 0, 0, 1}
+        },
+        ui_text { left_points = 50, text = v.title, vertical_align = 1 }
     }
 end
 
 
-function add_extension_popup(container)
+function add_extension_popup(container, module)
     ui_img {
-        color = {1, 1, 1, 1},
-        top_relative = 1,
-        bottom_points = 300,
-        right_points = 100,
+        scripts = {
+            "scripts/close_on_blur.lua"
+        },
+        color = {1, 1, 1, 0.75},
+        bottom_relative = 0,
+        top_points = -300,
+        left_relative = 0.5,
+        right_relative = 0.5,
+        right_points = 150,
+        left_points = -150,
         parent = container,
         vlayout {
+            top_points = 5,
             left_points = 5,
+            right_points = -5,
             row_height = 30,
             row_spacing = 5,
-            add_extension_button { title = "Air recycler", value = "air_recycler" },
-            add_extension_button { title = "Hydroponics", value = "hydroponics" },
-            add_extension_button { title = "Sleeping quarter", value = "sleeping_quarter" },
-            add_extension_button { title = "Toilet", value = "toilet" },
-            add_extension_button { title = "Water recycler", value = "water_recycler" },
+            add_extension_button { module = module, icon = "ui/air.spr", title = "Air recycler", value = "air_recycler" },
+            add_extension_button { module = module, icon = "ui/air.spr", title = "Hydroponics", value = "hydroponics" },
+            add_extension_button { module = module, icon = "ui/bed.spr", title = "Sleeping quarter", value = "sleeping_quarter" },
+            add_extension_button { module = module, icon = "ui/toilet.spr", title = "Toilet", value = "toilet" },
+            add_extension_button { module = module, icon = "ui/water.spr", title = "Water recycler", value = "water_recycler" },
         }
     }
 end
 
+function enable_ext_pane()
+    build_ext_pane.gui_rect.enabled = true
+    values_container_ui.gui_rect.enabled = false
+end
+
 function getExtensionByID(module_entity, id)
-    local m = Game.getModule(module_entity)
+    local m = Game.getModule({_entity = module_entity})
     for _, e in ipairs(m.extensions) do
         if e.id == id then return e end
     end
@@ -190,11 +250,10 @@ function ui_ext_assign_builder(ext, module)
     local builder = getBuilder(ext)
     if builder == nil and ext.build_progress < 1 then
         return ui_button {
-            top_points = 10,
-            left_relative = 1,
-            left_points = -100,
-            color = { 0.5, 0.5, 0.5, 1 },
-            hovered_color = { 0.5, 0.5, 0.5, 0.5 },
+            top_points = -30,
+            top_relative = 1,
+            color = style.button_color,
+            hovered_color = style.button_hovered_color,
             on_click = function(this)
                 crew_popup(this, function(c)
                     refresh = module.entity
@@ -203,31 +262,32 @@ function ui_ext_assign_builder(ext, module)
             end,
             ui_text {
                 horizontal_align = 1,
+                vertical_align = 1,
                 text = "Assign",
-                font_size = 20
+                font_size = 15
             }
         }
     end
 
     if builder ~= nil then
-        return ui_text {
-            text = builder.name .. " building...",
-            font_size = 20,
-            horizontal_align = 2,
-            ui_img {
-                color = {0, 1, 0, 1},
-                update = function(this)
-                    local p = getExtensionByID(module.entity, ext.id).build_progress
-                    this:getComponent("gui_rect").right_relative = p
-                    if p >= 1 then refresh = module.entity end
-                end
-            }
+        return ui_img {
+            top_relative = 1,
+            bottom_relative = 1,
+            top_points = -5,
+            bottom_points = 0,
+            color = {0, 1, 0, 1},
+            update = function(this)
+                local p = getExtensionByID(module.entity, ext.id).build_progress
+                this:getComponent("gui_rect").right_relative = p
+                if p >= 1 then refresh = module.entity end
+            end
         }
     end
 end
 
 function ui_extension(v)
-    return ui_rect {
+    return ui_img {
+        color = {0, 0, 0, 0.5},
         top_points = 5,
         bottom_points = 80, 
         bottom_relative = 0,
@@ -237,23 +297,23 @@ function ui_extension(v)
             right_relative = 0, 
             bottom_points = 40, 
             bottom_relative = 0,
-            ui_img {
-                sprite = v.sprite, 
-            }
+            sprite = v.sprite, 
         },
         ui_text {
-            left_points = 45,
+            right_points = -5,
             text = v.text,
             font_size = 20,
-            horizontal_align = 0
+            horizontal_align = 2,
+            vertical_align = 0
         },
+        --ui_recycle_ext(v.extension, v.module)
         ui_ext_assign_builder(v.extension, v.module)
     }
 end
 
 function update()
     if refresh ~= -1 then
-        setModule(refresh)
+        setModule({_entity = refresh})
         refresh = -1
     end
 end
@@ -288,11 +348,29 @@ function ui_assign_builder(module, crewmember)
     }
 end
 
+function getFreeSpace(module)
+    local res = 60
+    for _, e in ipairs(module.extensions) do
+        if e.type == "air_recycler" then
+            res = res - 12;
+        elseif e.type == "water_recycler" then
+            res = res - 15;
+        elseif e.type == "toilet" then
+            res = res - 20;
+        elseif e.type == "sleeping_quarter" then
+            res = res - 7;
+        end
+    end
+    return res
+end
+
 function setModule(entity)
+    values_container_ui.gui_rect.enabled = true
+    build_ext_pane.gui_rect.enabled = false
     this:getComponent("gui_rect").enabled = true
     local m = Game.getModule(entity)
 
-    local cont = Lumix.Entity:new(this._universe, values_container_ui)
+    local cont = values_container_ui
     local c = cont.first_child 
     while c ~= nil do
         destroyHierarchy(c)
@@ -302,6 +380,7 @@ function setModule(entity)
     if m.build_progress < 1 then 
         local crew = Game.getCrew()
         local ui = {
+            cols = 2,
             row_height = 40,
             row_spacing = 5,
             top_points = 5,
@@ -321,31 +400,29 @@ function setModule(entity)
             table.insert(ui, u)
         end
         ui_rect {
-            parent = { _entity = values_container_ui },
-            vlayout(ui),
+            parent = values_container_ui,
+            grid(ui),
             ui_img {
                 top_relative = 1,
-                top_points = -40,
+                top_points = -10,
                 bottom_points = -5,
-                ui_img {
-                    right_relative = m.build_progress,
-                    color = {0, 1, 0, 1},
-                    update = function(this)
-                        m = Game.getModule(m.entity)
-                        this:getComponent("gui_rect").right_relative = m.build_progress
-                        if m.build_progress >= 1 then
-                            refresh = m.entity
-                        end
+                right_relative = m.build_progress,
+                color = {0, 1, 0, 1},
+                update = function(this)
+                    m = Game.getModule({_entity = m.entity})
+                    this:getComponent("gui_rect").right_relative = m.build_progress
+                    if m.build_progress >= 1 then
+                        refresh = m.entity
                     end
-                }
+                end
             }
         }
     else 
         local uis = join({
-            parent = { _entity = values_container_ui },
-            row_height = 40,
+            row_height = 70,
             row_spacing = 5,
-            top_points = 5
+            cols = 2,
+            top_points = 25,
         },
         map(m.extensions, function(e)
             if e.type == "solar_panel" then
@@ -356,31 +433,41 @@ function setModule(entity)
                 return ui_extension { sprite = "ui/toilet.spr", text = "Toilet", extension = e, module = m}
             elseif e.type == "sleeping_quarter" then
                 return ui_extension { sprite = "ui/bed.spr", text = "Sleeping quarter", extension = e, module = m }
+            elseif e.type == "water_recycler" then
+                return ui_extension { sprite = "ui/water.spr", text = "Water recycler", extension = e, module = m }
             end
-            
+        
             return ui_text { text = "unknown"}
         end))
 
         table.insert(uis, ui_button {
-            color = { 0.5, 0.5, 0.5, 1 },
+            color = { 1, 0.5, 0.0, 1 },
             hovered_color = { 0.5, 0.5, 0.5, 0.5 },
-            left_relative = 0.5,
-            right_relative = 0.5,
-            left_points = -75,
-            right_points = 75,
             on_click = function(this)
-                add_extension_popup(this, function(c)
-                    refresh = m.entity
-                end)
+                enable_ext_pane()
             end,
-            ui_text {
+            ui_img {
+                sprite = "ui/build.spr",
+                right_relative = 0,
+                bottom_relative = 0,
+                left_points = 5,
                 top_points = 5,
-                text = "Add extension",
+                right_points = 45,
+                bottom_points = 45,
+                color = {0, 0, 0, 1}
+            },
+            ui_text {
+                text = "Build extension",
                 font_size = 20,
-                horizontal_align = 1
+                right_points = -5,
+                horizontal_align = 2,
+                vertical_align = 0
             }
         })
-
-        vlayout(uis)
+        ui_rect {
+            parent = values_container_ui,
+            ui_text { text = "Free space: " .. tostring(getFreeSpace(m)) .. " / 60" },
+            grid(uis)
+        }
     end
 end
