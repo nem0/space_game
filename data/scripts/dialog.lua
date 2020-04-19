@@ -10,17 +10,6 @@ Editor.setPropertyType(this, "titlebar", Editor.ENTITY_PROPERTY)
 local drag_type = ""
 local drag_start_value = {}
 local drag_start_mp = {}
-local mouse_in = false
-
-function onRectHoveredOut()
-    Gui.setCursor(0)
-    mouse_in = false
-end
-
-function onRectHovered()
-    Gui.setCursor(0)
-    mouse_in = true
-end
 
 function onInputEvent(event)
     if event.device.type ~= LumixAPI.INPUT_DEVICE_MOUSE then return end
@@ -32,18 +21,6 @@ function onInputEvent(event)
     elseif event.type == LumixAPI.INPUT_EVENT_AXIS then
         local gui_scene = this.universe:getScene("gui")
         local e = gui_scene:getRectAt({event.x_abs, event.y_abs})
-            
-        if e._entity ~= nil then
-            if e._entity == horizontal_sizer._entity then
-                Gui.setCursor(2)
-            elseif e._entity == vertical_sizer._entity then
-                Gui.setCursor(1)
-            elseif e._entity == sizer._entity then
-                Gui.setCursor(3)
-            elseif mouse_in then
-                Gui.setCursor(0)
-            end
-        end
         
         if drag_type == "" then return end
         local r = this.gui_rect
@@ -80,13 +57,14 @@ function onRectMouseDown(x, y)
     local e = gui_scene:getRectAt({x, y})
     if e == nil then return end
 
-    if e._entity == horizontal_sizer._entity then
-        drag_type = "h_resize"
-    elseif e._entity == vertical_sizer._entity then
-        drag_type = "v_resize"
-    elseif e._entity == sizer._entity then
+    
+    if gui_scene:isOver({x, y}, sizer) then
         drag_type = "resize"
-    elseif e._entity == titlebar._entity then
+    elseif gui_scene:isOver({x, y}, horizontal_sizer) then
+        drag_type = "h_resize"
+    elseif gui_scene:isOver({x, y}, vertical_sizer) then
+        drag_type = "v_resize"
+    elseif gui_scene:isOver({x, y}, titlebar) then
         drag_type = "move"
     end
 end

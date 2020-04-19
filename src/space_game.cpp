@@ -27,6 +27,7 @@ struct Extension {
 		TOILET,
 		SLEEPING_QUARTER,
 		WATER_RECYCLER,
+		HYDROPONICS,
 
 		NONE
 	};
@@ -141,6 +142,7 @@ struct GameScene : IScene {
 			case Extension::Type::WATER_RECYCLER: return "water_recycler";
 			case Extension::Type::TOILET: return "toilet";
 			case Extension::Type::SLEEPING_QUARTER: return "sleeping_quarter";
+			case Extension::Type::HYDROPONICS: return "hydroponics";
 			default: ASSERT(false); return "unknown";
 		}
 	}
@@ -163,6 +165,7 @@ struct GameScene : IScene {
 		static const u32 build_air_recycler_event = crc32("build_air_recycler");
 		static const u32 build_toilet_event = crc32("build_toilet");
 		static const u32 build_sleeping_quarter_event = crc32("build_sleeping_quarter");
+		static const u32 build_hydroponics_event = crc32("build_hydroponics");
 		if (event_hash == build_module_2_event) {
 			ASSERT(!m_build_preview.isValid());
 			EntityMap entity_map(m_allocator);
@@ -201,21 +204,40 @@ struct GameScene : IScene {
 		}
 		if (event_hash == build_water_recycler_event) {
 			addExtension(*m_selected_module, Extension::Type::WATER_RECYCLER, INVALID_ENTITY);
+			return;
+		}
+		if (event_hash == build_air_recycler_event) {
+			addExtension(*m_selected_module, Extension::Type::AIR_RECYCLER, INVALID_ENTITY);
+			return;
 		}
 		if (event_hash == build_toilet_event) {
 			addExtension(*m_selected_module, Extension::Type::TOILET, INVALID_ENTITY);
+			return;
 		}
 		if (event_hash == build_sleeping_quarter_event) {
 			addExtension(*m_selected_module, Extension::Type::SLEEPING_QUARTER, INVALID_ENTITY);
+			return;
 		}
-		
+		if (event_hash == build_hydroponics_event) {
+			addExtension(*m_selected_module, Extension::Type::HYDROPONICS, INVALID_ENTITY);
+			return;
+		}
+		ASSERT(false);
 	}
 
-	static void push(lua_State* L, Extension& ext) {
+	i32 getBuilder(const Extension& ext) const {
+		for (const CrewMember& c : m_station.crew) {
+			if (c.subject == ext.id && c.state == CrewMember::BUILDING) return c.id;
+		}
+		return -1;
+	}
+
+	static void push(GameScene* game, lua_State* L, Extension& ext) {
 		lua_newtable(L); // [ext]
 		LuaWrapper::setField(L, -1, "id", ext.id);
 		LuaWrapper::setField(L, -1, "entity", ext.entity.index);
 		LuaWrapper::setField(L, -1, "type", toString(ext.type));
+		LuaWrapper::setField(L, -1, "builder", game->getBuilder(ext));
 		LuaWrapper::setField(L, -1, "build_progress", ext.build_progress);
 	}
 
@@ -275,10 +297,16 @@ struct GameScene : IScene {
 	static int lua_getModule(lua_State* L) {
 		const EntityRef e = LuaWrapper::checkArg<EntityRef>(L, 1);
 		GameScene* game = getClosureScene(L);
-		if (!game) return 0;
+		if (!game) {
+			ASSERT(false);
+			return 0;
+		}
 
 		const int midx = game->m_station.modules.find([&](Module* m){ return m->entity == e; });
-		if (midx < 0) return 0;
+		if (midx < 0) {
+			ASSERT(false);
+			return 0;
+		}
 
 		LuaWrapper::DebugGuard guard(L, 1);
 		Module* m = game->m_station.modules[midx];
@@ -292,7 +320,7 @@ struct GameScene : IScene {
 
 		for (Extension*& ext : m->extensions) {
 			const int idx = 1 + int(&ext - m->extensions.begin());
-			push(L, *ext); // [module, exts, ext]
+			push(game, L, *ext); // [module, exts, ext]
 			lua_rawseti(L, -2, idx); // [module, exts]
 		}
 		lua_pop(L, 1); // [module]
@@ -348,7 +376,7 @@ struct GameScene : IScene {
 		m->build_progress = 1;
 		
 		const EntityPtr pin_e = m_universe.findByName(m->entity, "ext_0");
-		addExtension(*m, Extension::Type::SOLAR_PANEL, pin_e)->build_progress = 1;
+		addExtension(*m, Extension::Type::SOLAR_PANEL, pin_e)->build_progress = 0;
 		addExtension(*m, Extension::Type::AIR_RECYCLER, INVALID_ENTITY)->build_progress = 1;
 		addExtension(*m, Extension::Type::TOILET, INVALID_ENTITY)->build_progress = 1;
 		addExtension(*m, Extension::Type::SLEEPING_QUARTER, INVALID_ENTITY)->build_progress = 1;
@@ -512,6 +540,7 @@ struct GameScene : IScene {
 			case Extension::Type::AIR_RECYCLER : break;
 			case Extension::Type::TOILET : break;
 			case Extension::Type::SLEEPING_QUARTER: break;
+			case Extension::Type::HYDROPONICS: break;
 			default: ASSERT(false); break;
 		}
 		ext->type = type;
@@ -540,6 +569,9 @@ struct GameScene : IScene {
 						break;
 					case Extension::Type::WATER_RECYCLER:
 						stats.production.water = 10;
+						break;
+					case Extension::Type::HYDROPONICS:
+						stats.production.food = 20'000;
 						break;
 					case Extension::Type::SOLAR_PANEL:
 						stats.production.power += 120; // avg, max is 240
@@ -649,6 +681,7 @@ struct GameScene : IScene {
 							if (ext->build_progress >= 1) {
 								ext->build_progress  = 1;
 								c.state = CrewMember::IDLE;
+								c.subject = -1;
 							}
 							break;
 						}
