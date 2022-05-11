@@ -1,6 +1,6 @@
-#include "engine/crc32.h"
 #include "engine/engine.h"
 #include "engine/input_system.h"
+#include "engine/log.h"
 #include "engine/lua_wrapper.h"
 #include "engine/plugin.h"
 #include "engine/prefab.h"
@@ -16,25 +16,37 @@
 
 using namespace Lumix;
 
-static const ComponentType MODEL_INSTANCE_TYPE = Reflection::getComponentType("model_instance");
-static const ComponentType LUA_SCRIPT_TYPE = Reflection::getComponentType("lua_script");
-static const ComponentType GUI_BUTTON_TYPE = Reflection::getComponentType("gui_button");
+static const ComponentType MODEL_INSTANCE_TYPE = reflection::getComponentType("model_instance");
+static const ComponentType LUA_SCRIPT_TYPE = reflection::getComponentType("lua_script");
+static const ComponentType GUI_BUTTON_TYPE = reflection::getComponentType("gui_button");
+
+struct Blueprint {
+	char type[32] = "Not set";
+	char label[64] = "Not set";
+	PrefabResource* prefab = nullptr;
+	char desc[2048];
+	float power_cons = 0;
+	float power_prod = 0;
+	float heat_cons = 0;
+	float heat_prod = 0;
+	float water_cons = 0;
+	float water_prod = 0;
+	float food_cons = 0;
+	float food_prod = 0;
+	float air_cons = 0;
+	float air_prod = 0;
+	float volume = 0;
+	float material_cost = 0;
+	float build_time = 0;
+} blueprint;
+using BlueprintHandle = u32;
+
 
 struct Extension {
-	enum class Type {
-		SOLAR_PANEL,
-		AIR_RECYCLER,
-		TOILET,
-		SLEEPING_QUARTER,
-		WATER_RECYCLER,
-		HYDROPONICS,
-
-		NONE
-	};
 	u32 id;
 	EntityPtr entity;
-	Type type;
 	float build_progress = 0.f;
+	BlueprintHandle blueprint = 0xffFFffFF;
 };
 
 struct CrewMember {
@@ -70,9 +82,23 @@ struct Stats {
 		float heat = 0;
 		float water = 0;
 		float food = 0;
+		float fuel = 0;
 	} consumption;
+	
+	struct {
+		float food = 0;
+		float water = 0;
+		float fuel = 0;
+		float materials = 0;
+	} stored;
+	struct {
+		float food = 0;
+		float water = 0;
+		float fuel = 0;
+		float materials = 0;
+	} storage_space;
 	float volume = 0;
-	float stored_power = 0;
+	float efficiency = 1.f;
 };
 
 struct SpaceStation {
@@ -98,21 +124,24 @@ struct Game : IPlugin {
 	{
 		// TODO this does not work if the asset is not precompiled at this time, since asset compiler is not hooked at this point
 		ResourceManagerHub& rm = m_engine.getResourceManager();
-		m_assets.module_2 = rm.load<PrefabResource>(Path("prefabs/module_2.fab"));
-		m_assets.module_3 = rm.load<PrefabResource>(Path("prefabs/module_3.fab"));
-		m_assets.module_4 = rm.load<PrefabResource>(Path("prefabs/module_4.fab"));
-		m_assets.solar_panel = rm.load<PrefabResource>(Path("prefabs/solar_panel.fab"));
+		//m_assets.module_2 = rm.load<PrefabResource>(Path("prefabs/module_2.fab"));
+		//m_assets.module_3 = rm.load<PrefabResource>(Path("prefabs/module_3.fab"));
+		//m_assets.module_4 = rm.load<PrefabResource>(Path("prefabs/module_4.fab"));
+		//m_assets.solar_panel = rm.load<PrefabResource>(Path("prefabs/solar_panel.fab"));
 	}
 
 	~Game() {
-		m_assets.module_2->getResourceManager().unload(*m_assets.module_2);
-		m_assets.module_3->getResourceManager().unload(*m_assets.module_3);
-		m_assets.module_4->getResourceManager().unload(*m_assets.module_4);
-		m_assets.solar_panel->getResourceManager().unload(*m_assets.solar_panel);
+		m_assets.module_2->decRefCount();
+		m_assets.module_3->decRefCount();
+		m_assets.module_4->decRefCount();
+		m_assets.solar_panel->decRefCount();
 	}
 
+	u32 getVersion() const override { return 0; }
+	void serialize(OutputMemoryStream& stream) const override {}
+	bool deserialize(u32 version, InputMemoryStream& stream) override { return version == 0; }
+
 	void createScenes(Universe& universe) override;
-	void destroyScene(IScene* scene) override { LUMIX_DELETE(m_engine.getAllocator(), scene); }
 
 	const char* getName() const override { return "game"; }
 
@@ -120,31 +149,69 @@ struct Game : IPlugin {
 	Engine& m_engine;
 };
 
+
 struct GameScene : IScene {
 	GameScene(Game& game, Universe& universe) 
 		: m_game(game)
 		, m_universe(universe)
 		, m_station(game.m_engine.getAllocator())
 		, m_allocator(game.m_engine.getAllocator())
+		, m_blueprints(game.m_engine.getAllocator())
 	{
 		lua_State* L = m_game.m_engine.getState();
 		LuaWrapper::createSystemClosure(L, "Game", this, "getStationStats", lua_getStationStats);
 		LuaWrapper::createSystemClosure(L, "Game", this, "getModule", lua_getModule);
+		LuaWrapper::createSystemClosure(L, "Game", this, "getBlueprints", lua_getBlueprints);
 		LuaWrapper::createSystemClosure(L, "Game", this, "getCrew", lua_getCrew);
 		LuaWrapper::createSystemClosure(L, "Game", this, "assignBuilder", lua_assignBuilder);
 		LuaWrapper::createSystemClosure(L, "Game", this, "onGUIEvent", lua_onGUIEvent);
-	}
 
-	static const char* toString(Extension::Type type) {
-		switch (type) {
-			case Extension::Type::SOLAR_PANEL: return "solar_panel";
-			case Extension::Type::AIR_RECYCLER: return "air_recycler";
-			case Extension::Type::WATER_RECYCLER: return "water_recycler";
-			case Extension::Type::TOILET: return "toilet";
-			case Extension::Type::SLEEPING_QUARTER: return "sleeping_quarter";
-			case Extension::Type::HYDROPONICS: return "hydroponics";
-			default: ASSERT(false); return "unknown";
-		}
+		#define EXT(_type, _label, _volume, _material_cost, _build_time) \
+			Blueprint& _type = m_blueprints.emplace(); \
+			copyString(_type.type, #_type); \
+			copyString(_type.label, _label); \
+			_type.volume = _volume; \
+			_type.material_cost = _material_cost; \
+			_type.build_time = _build_time; \
+
+		EXT(air_recycler, "Air recycler", 5, 1000, 1);
+		air_recycler.air_prod = 2000;
+		air_recycler.power_cons = 25;
+		copyString(air_recycler.desc, R"#(Basic air recycler. It removes carbon dioxide from air and adds oxygen.
+It consumes 25 kJ/s of electricity.)#");
+
+		EXT(water_recycler, "Water recycler", 5, 1000, 1);
+		water_recycler.water_prod = 10;
+		water_recycler.power_cons = 25;
+		copyString(water_recycler.desc, R"#(Basic water recycler recycles all kinds of waste water, including urine.
+It produces drinkable water and needs 25 kJ/s of electricity to do so.)#");
+
+		EXT(solar_panel, "Solar panel", 0, 1500, 2);
+		solar_panel.power_prod = 120; // avg, max is 240
+		solar_panel.prefab = m_game.m_assets.solar_panel;
+
+		EXT(toilet, "Toilet", 0, 500, 2);
+		toilet.power_cons = 10;
+		copyString(toilet.desc, R"#(It's used to dispose of urine and excrements.
+The waste is stored, so it can be recycled later.
+It consumes 5 kJ/s of electricity.)#");
+
+		
+		EXT(sleeping_quarter, "Sleeping quarter", 6, 30, 1);
+		copyString(sleeping_quarter.desc, R"#(A place for one crewmember to sleep. 
+While people can sleep even without sleeping quarter, 
+it lower their health and morale considerably.)#");
+
+		EXT(hydroponics, "Hydroponics", 45, 300, 3);
+		hydroponics.food_prod = 10;
+		hydroponics.power_cons = 250;
+		hydroponics.water_cons = 2;
+		copyString(hydroponics.desc, R"#(A method of growing plants without soil, 
+by instead using mineral nutrient solutions in a water solvent.
+It consumes 10 kJ/s of electricity and 5l/day of water.
+It produces 20 000 kcal/day of food.)#");
+
+		#undef EXT
 	}
 
 	static int lua_onGUIEvent(lua_State* L) {
@@ -152,74 +219,75 @@ struct GameScene : IScene {
 		GameScene* game = getClosureScene(L);
 		if (!game) return 0;
 
-		game->onGUIEvent(crc32(event_name));
+		game->onGUIEvent(event_name);
 		return 0;
 	}
 
-	void onGUIEvent(u32 event_hash) {
-		static const u32 build_module_2_event = crc32("build_module_2");
-		static const u32 build_module_3_event = crc32("build_module_3");
-		static const u32 build_module_4_event = crc32("build_module_4");
-		static const u32 build_solar_panel_event = crc32("build_solar_panel");
-		static const u32 build_water_recycler_event = crc32("build_water_recycler");
-		static const u32 build_air_recycler_event = crc32("build_air_recycler");
-		static const u32 build_toilet_event = crc32("build_toilet");
-		static const u32 build_sleeping_quarter_event = crc32("build_sleeping_quarter");
-		static const u32 build_hydroponics_event = crc32("build_hydroponics");
+	void onGUIEvent(const char* event_name) {
+		const RuntimeHash event_hash(event_name);
+		static const RuntimeHash time_0x_event("time_0x");
+		static const RuntimeHash time_1x_event("time_1x");
+		static const RuntimeHash time_2x_event("time_2x");
+		static const RuntimeHash time_4x_event("time_4x");
+
+		static const RuntimeHash build_module_2_event("build_module_2");
+		static const RuntimeHash build_module_3_event("build_module_3");
+		static const RuntimeHash build_module_4_event("build_module_4");
+		static const RuntimeHash build_solar_panel_event("build_solar_panel");
+		
+		if (event_hash == time_0x_event) {
+			m_time_multiplier = 0;
+			return;
+		}
+		if (event_hash == time_1x_event) {
+			m_time_multiplier = 1;
+			return;
+		}
+		if (event_hash == time_2x_event) {
+			m_time_multiplier = 2;
+			return;
+		}
+		if (event_hash == time_4x_event) {
+			m_time_multiplier = 4;
+			return;
+		}
+		
 		if (event_hash == build_module_2_event) {
 			ASSERT(!m_build_preview.isValid());
 			EntityMap entity_map(m_allocator);
-			const bool created = m_game.m_engine.instantiatePrefab(m_universe, *m_game.m_assets.module_2, {0, 0, 0}, Quat::IDENTITY, 1.f, Ref(entity_map));
+			const bool created = m_game.m_engine.instantiatePrefab(m_universe, *m_game.m_assets.module_2, {0, 0, 0}, Quat::IDENTITY, 1.f, entity_map);
 			m_build_preview = entity_map.m_map[0];
 			m_build_prefab = m_game.m_assets.module_2;
-			m_build_ext_type = Extension::Type::NONE;
 			return;
 		}
 		if (event_hash == build_module_3_event) {
 			ASSERT(!m_build_preview.isValid());
 			EntityMap entity_map(m_allocator);
-			const bool created = m_game.m_engine.instantiatePrefab(m_universe, *m_game.m_assets.module_3, {0, 0, 0}, Quat::IDENTITY, 1.f, Ref(entity_map));
+			const bool created = m_game.m_engine.instantiatePrefab(m_universe, *m_game.m_assets.module_3, {0, 0, 0}, Quat::IDENTITY, 1.f, entity_map);
 			m_build_preview = entity_map.m_map[0];
 			m_build_prefab = m_game.m_assets.module_3;
-			m_build_ext_type = Extension::Type::NONE;
 			return;
 		}
 		if (event_hash == build_module_4_event) {
 			ASSERT(!m_build_preview.isValid());
 			EntityMap entity_map(m_allocator);
-			const bool created = m_game.m_engine.instantiatePrefab(m_universe, *m_game.m_assets.module_4, {0, 0, 0}, Quat::IDENTITY, 1.f, Ref(entity_map));
+			const bool created = m_game.m_engine.instantiatePrefab(m_universe, *m_game.m_assets.module_4, {0, 0, 0}, Quat::IDENTITY, 1.f, entity_map);
 			m_build_preview = entity_map.m_map[0];
 			m_build_prefab = m_game.m_assets.module_4;
-			m_build_ext_type = Extension::Type::NONE;
 			return;
 		}
 		if (event_hash == build_solar_panel_event) {
-			ASSERT(!m_build_preview.isValid());
+			ASSERT(false);
+			/*ASSERT(!m_build_preview.isValid());
 			EntityMap entity_map(m_allocator);
 			const bool created = m_game.m_engine.instantiatePrefab(m_universe, *m_game.m_assets.solar_panel, {0, 0, 0}, Quat::IDENTITY, 1.f, Ref(entity_map));
 			m_build_preview = entity_map.m_map[0];
 			m_build_prefab = m_game.m_assets.solar_panel;
-			m_build_ext_type = Extension::Type::SOLAR_PANEL;
+			m_build_ext_type = Extension::Type::SOLAR_PANEL;*/
 			return;
 		}
-		if (event_hash == build_water_recycler_event) {
-			addExtension(*m_selected_module, Extension::Type::WATER_RECYCLER, INVALID_ENTITY);
-			return;
-		}
-		if (event_hash == build_air_recycler_event) {
-			addExtension(*m_selected_module, Extension::Type::AIR_RECYCLER, INVALID_ENTITY);
-			return;
-		}
-		if (event_hash == build_toilet_event) {
-			addExtension(*m_selected_module, Extension::Type::TOILET, INVALID_ENTITY);
-			return;
-		}
-		if (event_hash == build_sleeping_quarter_event) {
-			addExtension(*m_selected_module, Extension::Type::SLEEPING_QUARTER, INVALID_ENTITY);
-			return;
-		}
-		if (event_hash == build_hydroponics_event) {
-			addExtension(*m_selected_module, Extension::Type::HYDROPONICS, INVALID_ENTITY);
+		if (startsWith(event_name, "build_")) {
+			addExtension(*m_selected_module, event_name + stringLength("build_"), INVALID_ENTITY);
 			return;
 		}
 		ASSERT(false);
@@ -236,7 +304,7 @@ struct GameScene : IScene {
 		lua_newtable(L); // [ext]
 		LuaWrapper::setField(L, -1, "id", ext.id);
 		LuaWrapper::setField(L, -1, "entity", ext.entity.index);
-		LuaWrapper::setField(L, -1, "type", toString(ext.type));
+		LuaWrapper::setField(L, -1, "blueprint", ext.blueprint);
 		LuaWrapper::setField(L, -1, "builder", game->getBuilder(ext));
 		LuaWrapper::setField(L, -1, "build_progress", ext.build_progress);
 	}
@@ -256,7 +324,7 @@ struct GameScene : IScene {
 			}
 		}
 
-		logError("Game") << "Invalid crewmember in assignBuilder";
+		logError("Invalid crewmember in assignBuilder");
 
 		return 0;
 	}
@@ -264,7 +332,7 @@ struct GameScene : IScene {
 	static GameScene* getClosureScene(lua_State* L) {
 		const int index = lua_upvalueindex(1);
 		if (!LuaWrapper::isType<GameScene>(L, index)) {
-			logError("Lua") << "Invalid Lua closure";
+			logError("Invalid Lua closure");
 			ASSERT(false);
 			return nullptr;
 		}
@@ -328,6 +396,40 @@ struct GameScene : IScene {
 		return 1;
 	}
 
+	static int lua_getBlueprints(lua_State* L) {
+		GameScene* game = getClosureScene(L);
+		if (!game) return 0;
+
+		lua_createtable(L, game->m_blueprints.size(), 0); // [bps]
+		for (i32 i = 0; i < game->m_blueprints.size(); ++i) {
+			const Blueprint& bp = game->m_blueprints[i];
+			lua_newtable(L); // [bps, bp]
+
+			#define EXP(T) LuaWrapper::setField(L, -1, #T, bp.T);
+			EXP(type);
+			EXP(label);
+			EXP(prefab);
+			EXP(desc);
+			EXP(power_cons);
+			EXP(power_prod);
+			EXP(heat_cons);
+			EXP(heat_prod);
+			EXP(water_cons);
+			EXP(water_prod);
+			EXP(food_cons);
+			EXP(food_prod);
+			EXP(air_cons);
+			EXP(air_prod);
+			EXP(volume);
+			EXP(material_cost);
+			EXP(build_time);
+			
+			#undef EXP
+			lua_rawseti(L, -2, i + 1);
+		}
+		return 1;
+	}
+
 	static int lua_getStationStats(lua_State* L) {
 		GameScene* game = getClosureScene(L);
 		if (!game) return 0;
@@ -344,6 +446,19 @@ struct GameScene : IScene {
 		LuaWrapper::setField(L, -1, "food_prod", stats.production.food);
 		LuaWrapper::setField(L, -1, "air_cons", stats.consumption.air);
 		LuaWrapper::setField(L, -1, "air_prod", stats.production.air);
+		LuaWrapper::setField(L, -1, "fuel_cons", stats.consumption.fuel);
+		
+		LuaWrapper::setField(L, -1, "water_stored", stats.stored.water);
+		LuaWrapper::setField(L, -1, "food_stored", stats.stored.food);
+		LuaWrapper::setField(L, -1, "fuel_stored", stats.stored.fuel);
+		LuaWrapper::setField(L, -1, "materials_stored", stats.stored.materials);
+
+		LuaWrapper::setField(L, -1, "water_space", stats.storage_space.water);
+		LuaWrapper::setField(L, -1, "food_space", stats.storage_space.food);
+		LuaWrapper::setField(L, -1, "fuel_space", stats.storage_space.fuel);
+		LuaWrapper::setField(L, -1, "materials_space", stats.storage_space.materials);
+		
+		LuaWrapper::setField(L, -1, "efficiency", stats.efficiency);
 		return 1;
 	}
 
@@ -351,7 +466,7 @@ struct GameScene : IScene {
 	struct Universe& getUniverse() override { return m_universe; }
 
 	void serialize(OutputMemoryStream& serializer) override {}
-	void deserialize(InputMemoryStream& serialize, const EntityMap& entity_map) override {}
+	void deserialize(InputMemoryStream& serialize, const EntityMap& entity_map, i32 version) override {}
 	void clear() override {}
 	
 	EntityRef findByName(EntityRef parent, const char* first, const char* second) {
@@ -367,6 +482,7 @@ struct GameScene : IScene {
 	}
 
 	void startGame() override {
+		m_time_multiplier = 0;
 		m_angle = PI * 0.5f;
 		m_ref_point = (EntityRef)m_universe.findByName(INVALID_ENTITY, "ref_point");
 		m_camera = (EntityRef)m_universe.findByName(m_ref_point, "camera");
@@ -376,16 +492,22 @@ struct GameScene : IScene {
 		m->build_progress = 1;
 		
 		const EntityPtr pin_e = m_universe.findByName(m->entity, "ext_0");
-		addExtension(*m, Extension::Type::SOLAR_PANEL, pin_e)->build_progress = 0;
-		addExtension(*m, Extension::Type::AIR_RECYCLER, INVALID_ENTITY)->build_progress = 1;
-		addExtension(*m, Extension::Type::TOILET, INVALID_ENTITY)->build_progress = 1;
-		addExtension(*m, Extension::Type::SLEEPING_QUARTER, INVALID_ENTITY)->build_progress = 1;
+		addExtension(*m, "solar_panel", pin_e)->build_progress = 0;
+		addExtension(*m, "air_recycler", INVALID_ENTITY)->build_progress = 1;
+		addExtension(*m, "toilet", INVALID_ENTITY)->build_progress = 1;
+		addExtension(*m, "sleeping_quarter", INVALID_ENTITY)->build_progress = 1;
 		CrewMember& c0 = m_station.crew.emplace();
 		CrewMember& c1 = m_station.crew.emplace();
-		c0.id = ++id_generator;
+		c0.id = ++m_id_generator;
 		c0.name = "Donald Trump";
-		c1.id = ++id_generator;
+		c1.id = ++m_id_generator;
 		c1.name = "Alber Einstein";
+
+		m_station.stats.stored.water = 300;
+		m_station.stats.stored.food = 450'000;
+		m_station.stats.stored.fuel = 700;
+		m_station.stats.stored.materials = 15300;
+
 		initGUI();
 		m_is_game_started = true;
 	}
@@ -440,7 +562,7 @@ struct GameScene : IScene {
 
 		const Transform rel = hatch_b_tr.inverted() * module_b_tr;
 		Transform res = hatch_a_tr * rel;
-		res.rot.normalize();
+		res.rot = normalize(res.rot);
 		return res;
 	}
 
@@ -451,7 +573,7 @@ struct GameScene : IScene {
 
 		const Transform rel = hatch_b_tr.inverted() * module_b_tr;
 		Transform res = hatch_a_tr * rel;
-		res.rot.normalize();
+		res.rot = normalize(res.rot);
 		return res;
 	}
 
@@ -465,7 +587,7 @@ struct GameScene : IScene {
 		const Vec3 N = ref_tr.rot.rotate(Vec3(0, 0, 1));
 
 		if (m_build_preview.isValid()) {
-			float t;
+			/*float t;
 			if (getRayPlaneIntersecion(origin.toFloat(), dir, ref_tr.pos.toFloat(), N, t)) {
 				const DVec3 p = origin + dir * t;
 				if (m_build_ext_type != Extension::Type::NONE) {
@@ -488,7 +610,8 @@ struct GameScene : IScene {
 			}
 			destroyChildren((EntityRef)m_build_preview);
 			m_universe.destroyEntity((EntityRef)m_build_preview);
-			m_build_preview = INVALID_ENTITY;
+			m_build_preview = INVALID_ENTITY;*/
+			ASSERT(false);
 		}
 
 		const RayCastModelHit hit = getRenderScene().castRay(origin, dir, INVALID_ENTITY);
@@ -511,9 +634,9 @@ struct GameScene : IScene {
 
 	Module* addModule(PrefabResource& prefab) {
 		Module* m = LUMIX_NEW(m_allocator, Module)(m_allocator);
-		m->id = ++id_generator;
+		m->id = ++m_id_generator;
 		EntityMap entity_map(m_allocator);
-		const bool created = m_game.m_engine.instantiatePrefab(m_universe, prefab, {0, 0, 0}, Quat::IDENTITY, 1.f, Ref(entity_map));
+		const bool created = m_game.m_engine.instantiatePrefab(m_universe, prefab, {0, 0, 0}, Quat::IDENTITY, 1.f, entity_map);
 		m->entity = (EntityRef)entity_map.m_map[0];
 		m_universe.setParent(m_ref_point, m->entity);
 		m_universe.setLocalPosition(m->entity, {0, 0, 0});
@@ -521,29 +644,24 @@ struct GameScene : IScene {
 		return m;
 	}
 
-	Extension* addExtension(Module& module, Extension::Type type, EntityPtr pin_e) {
-		Extension* ext = LUMIX_NEW(m_allocator, Extension);
-		ext->id = ++id_generator;
+	Extension* addExtension(Module& module, const char* blueprint, EntityPtr pin_e) {
+		const BlueprintHandle bp = m_blueprints.find([blueprint](const Blueprint& bp){ return equalStrings(bp.type, blueprint); });
+		ASSERT(bp != -1);
 
-		switch (type) {
-			case Extension::Type::SOLAR_PANEL : {
-				EntityMap entity_map(m_allocator);
-				bool res = m_game.m_engine.instantiatePrefab(m_universe, *m_game.m_assets.solar_panel, {0, 0, 0}, Quat::IDENTITY, 1.f, Ref(entity_map));
-				ASSERT(res);
-				const EntityRef e = (EntityRef)entity_map.m_map[0];
-				ext->entity = e;
-				m_universe.setParent(pin_e, e);
-				m_universe.setLocalTransform(e, Transform::IDENTITY);
-				break;
-			}
-			case Extension::Type::WATER_RECYCLER : break;
-			case Extension::Type::AIR_RECYCLER : break;
-			case Extension::Type::TOILET : break;
-			case Extension::Type::SLEEPING_QUARTER: break;
-			case Extension::Type::HYDROPONICS: break;
-			default: ASSERT(false); break;
+		Extension* ext = LUMIX_NEW(m_allocator, Extension);
+		ext->id = ++m_id_generator;
+
+		if (m_blueprints[bp].prefab) {
+			EntityMap entity_map(m_allocator);
+			bool res = m_game.m_engine.instantiatePrefab(m_universe, *m_blueprints[bp].prefab, {0, 0, 0}, Quat::IDENTITY, 1.f, entity_map);
+			ASSERT(res);
+			const EntityRef e = (EntityRef)entity_map.m_map[0];
+			ext->entity = e;
+			m_universe.setParent(pin_e, e);
+			m_universe.setLocalTransform(e, Transform::IDENTITY);
 		}
-		ext->type = type;
+
+		ext->blueprint = bp;
 		module.extensions.push(ext);
 		return ext;
 	}
@@ -553,30 +671,48 @@ struct GameScene : IScene {
 		stats.volume = 0;
 		stats.production = {};
 		stats.consumption = {};
+		stats.storage_space = {};
+		stats.storage_space.materials = 15000;
+
+		for (const Module* m : m_station.modules) {
+			if (m->build_progress < 1) continue;
+			stats.consumption.power += 7; // consumed by necessary module electronics
+			for (Extension* ext : m->extensions) {
+				if (ext->build_progress < 1) continue;
+
+				const Blueprint& bp = m_blueprints[ext->blueprint];
+				stats.production.power += bp.power_prod;
+				stats.consumption.power += bp.power_cons;
+			}
+		}
+
+		const float efficiency = clamp(stats.production.power / stats.consumption.power, 0.f, 1.f);
+		stats.efficiency = efficiency;
 
 		for (const Module* m : m_station.modules) {
 			if (m->build_progress < 1) continue;
 			stats.volume += 40; // usable volume in m3
 			stats.consumption.heat += 10; // IR emission from the module itself
-			stats.production.heat += 5; // produced by necessary module electronics
-			stats.consumption.power += 7; // consumed by necessary module electronics
-			
+			stats.production.heat += 5 * efficiency; // produced by necessary module electronics
+			stats.storage_space.food += 500000;
+			stats.storage_space.water += 200;
+			stats.storage_space.fuel += 1000;
+			stats.storage_space.materials += 1000;
+			stats.consumption.fuel += 0.1f;
+
 			for (Extension* ext : m->extensions) {
 				if (ext->build_progress < 1) continue;
-				switch (ext->type) {
-					case Extension::Type::AIR_RECYCLER:
-						stats.production.air = 2000;
-						break;
-					case Extension::Type::WATER_RECYCLER:
-						stats.production.water = 10;
-						break;
-					case Extension::Type::HYDROPONICS:
-						stats.production.food = 20'000;
-						break;
-					case Extension::Type::SOLAR_PANEL:
-						stats.production.power += 120; // avg, max is 240
-						break;
-				}
+				const Blueprint& bp = m_blueprints[ext->blueprint];
+				
+				stats.production.air += bp.air_prod * efficiency;
+				stats.production.food += bp.food_prod * efficiency;
+				stats.production.heat += bp.heat_prod * efficiency;
+				stats.production.water += bp.water_prod * efficiency;
+
+				stats.consumption.air += bp.air_cons * efficiency;
+				stats.consumption.food += bp.food_cons* efficiency;
+				stats.consumption.heat += bp.heat_cons* efficiency;
+				stats.consumption.water += bp.water_cons* efficiency;
 			}
 		}
 
@@ -586,6 +722,15 @@ struct GameScene : IScene {
 			stats.consumption.water += 4.5;
 			stats.consumption.food += 2700;
 		}
+
+
+		stats.stored.fuel -= time_delta * stats.consumption.fuel;
+		stats.stored.food += time_delta * (stats.production.food - stats.consumption.food);
+		stats.stored.water += time_delta * (stats.production.water - stats.consumption.water);
+		stats.stored.food = clamp(stats.stored.food, 0.f, stats.storage_space.food);
+		stats.stored.water = clamp(0.f, stats.stored.water, stats.storage_space.water);
+		stats.stored.fuel = clamp(0.f, stats.stored.fuel, stats.storage_space.fuel);
+		stats.stored.materials = clamp(0.f, stats.stored.materials, stats.storage_space.materials);
 	}
 
 	Module* getModule(EntityRef e) {
@@ -625,7 +770,7 @@ struct GameScene : IScene {
 							case 'S': is_backward = e.data.button.down; break;
 							case 'A': is_left = e.data.button.down; break;
 							case 'D': is_right = e.data.button.down; break;
-							case (u32)OS::Keycode::SHIFT: is_fast = e.data.button.down; break;
+							case (u32)os::Keycode::SHIFT: is_fast = e.data.button.down; break;
 						}
 					}
 					break;
@@ -633,7 +778,7 @@ struct GameScene : IScene {
 					if (is_rmb_down) {
 						const Quat drot = Quat(up, -e.data.axis.x * 0.003f);
 						const Quat drotx = Quat(side, -e.data.axis.y * 0.003f);
-						m_universe.setRotation(m_camera, (drotx * drot * rot).normalized());
+						m_universe.setRotation(m_camera, normalize(drotx * drot * rot));
 					}
 					break;
 			}
@@ -644,7 +789,7 @@ struct GameScene : IScene {
 		if (is_backward) move += Vec3(0, 0, 1);
 		if (is_left) move += Vec3(-1, 0, 0);
 		if (is_right) move += Vec3(1, 0, 0);
-		if (move.squaredLength() > 0.1f) {
+		if (squaredLength(move) > 0.1f) {
 			move = rot.rotate(move);
 			DVec3 p = m_universe.getPosition(m_camera);
 			p += move * time_delta * (is_fast ? 100.f : 10.f);
@@ -653,10 +798,15 @@ struct GameScene : IScene {
 	}
 
 	void update(float time_delta, bool paused) override {
+		// TODO
+		// game speed
+		// searching for resource & crew
+		// crew
+		// research
 		if (paused) return;
 		if (!m_is_game_started) return;
 
-		m_angle = fmodf(m_angle + time_delta * 0.2f, PI * 2);
+		m_angle = fmodf(m_angle + m_time_multiplier * time_delta * 0.2f, PI * 2);
 		const float R = 6378e3 + 400e3;
 		const DVec3 ref_point_pos = {cosf(m_angle) * R, 0, sinf(m_angle) * R};
 		m_universe.setPosition(m_ref_point, ref_point_pos);
@@ -668,7 +818,7 @@ struct GameScene : IScene {
 			if (c.state == CrewMember::BUILDING) {
 				for (Module* m : m_station.modules) {
 					if (m->id == c.subject) {
-						m->build_progress += time_delta * 0.1f;
+						m->build_progress += time_delta * 0.01f * m_time_multiplier;
 						if (m->build_progress >= 1) {
 							m->build_progress  = 1;
 							c.state = CrewMember::IDLE;
@@ -677,7 +827,7 @@ struct GameScene : IScene {
 					}
 					for (Extension* ext : m->extensions) {
 						if (ext->id == c.subject) {
-							ext->build_progress += time_delta * 0.1f;
+							ext->build_progress += time_delta * 0.05f * m_time_multiplier;
 							if (ext->build_progress >= 1) {
 								ext->build_progress  = 1;
 								c.state = CrewMember::IDLE;
@@ -690,7 +840,7 @@ struct GameScene : IScene {
 			}
 		}
 
-		computeStats(time_delta);
+		computeStats(time_delta * m_time_multiplier);
 		updateBuildPreview();
 	}
 
@@ -709,7 +859,7 @@ struct GameScene : IScene {
 				EntityRef child = (EntityRef)ch;
 				const char* name = m_universe.getEntityName(child);
 				if (startsWith(name, prefix)) {
-					const double d = (p - m_universe.getPosition(child)).squaredLength();
+					const double d = squaredLength(p - m_universe.getPosition(child));
 					if (d < pin_dist) {
 						pin_dist = (float)d;
 						closest_pin = child;
@@ -727,6 +877,7 @@ struct GameScene : IScene {
 	void updateBuildPreview() {
 		if (!m_build_preview.isValid()) return;
 
+		ASSERT(false);/*
 		const IVec2 mp = getGUIScene().getCursorPosition();
 
 		const Viewport& vp = getRenderScene().getCameraViewport(m_camera);
@@ -756,10 +907,11 @@ struct GameScene : IScene {
 			}
 
 			m_universe.setPosition((EntityRef)m_build_preview, p);
-		}
+		}*/
 	}
 
 	bool m_is_game_started = false;
+	u32 m_time_multiplier = 0;
 	IAllocator& m_allocator;
 	Game& m_game;
 	Universe& m_universe;
@@ -770,15 +922,17 @@ struct GameScene : IScene {
 	
 	EntityPtr m_build_preview = INVALID_ENTITY;
 	PrefabResource* m_build_prefab = nullptr;
-	Extension::Type m_build_ext_type = Extension::Type::NONE;
+	//Extension::Type m_build_ext_type = Extension::Type::NONE;
 
 	Module* m_selected_module = nullptr;
-	u32 id_generator = 0;
+	u32 m_id_generator = 0;
+	Array<Blueprint> m_blueprints;
 };
 
 void Game::createScenes(Universe& universe) {
-	GameScene* scene = LUMIX_NEW(m_engine.getAllocator(), GameScene)(*this, universe); 
-	universe.addScene(scene);
+	IAllocator& allocator = m_engine.getAllocator();
+	UniquePtr<GameScene> scene = UniquePtr<GameScene>::create(allocator, *this, universe);
+	universe.addScene(scene.move());
 }
 
 LUMIX_PLUGIN_ENTRY(game_plugin) {
