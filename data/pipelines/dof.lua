@@ -3,7 +3,7 @@ near_sharp = 3
 far_sharp = 50
 far_blur = 70
 
-function postprocess(env, phase, input, gbuffer0, gbuffer1, gbuffer_depth, shadowmap)
+function postprocess(env, phase, input, gbuffer0, gbuffer1, gbuffer2, gbuffer_depth, shadowmap)
 	if not enabled then return input end
 	if phase ~= "post" then return input end
 	env.beginBlock("dof")
@@ -12,55 +12,53 @@ function postprocess(env, phase, input, gbuffer0, gbuffer1, gbuffer_depth, shado
 		env.dof_blur_shader = env.preloadShader("pipelines/dof_blur.shd")
 	end
 
-	local tmp_rb = env.createRenderbuffer(1, 1, true, "rgba16f", "dof_tmp")
+	local tmp_rb = env.createRenderbuffer { width = env.viewport_w, height = env.viewport_h, format = "rgba16f", debug_name = "dof_tmp" }
 	
 	env.setRenderTargets(tmp_rb)
-	env.drawArray(0, 4, env.dof_blur_shader, 
+	env.drawcallUniforms(near_blur, near_sharp, far_sharp, far_blur)
+
+	env.drawArray(0, 3, env.dof_blur_shader, 
 		{ 
 			input,
 			gbuffer_depth
 		},
-		{ { near_blur, near_sharp, far_sharp, far_blur } },
-		{ "HBLUR", "NEAR" },
-		{ depth_test = false, blending = "alpha"}
+		{ depth_test = false, blending = "alpha"},
+		{ "HBLUR", "NEAR" }
 	)
 
 	env.setRenderTargets(input)
-	env.drawArray(0, 4, env.dof_blur_shader, 
+	env.drawArray(0, 3, env.dof_blur_shader, 
 		{
 			tmp_rb,
 			gbuffer_depth
 		},
-		{ { near_blur, near_sharp, far_sharp, far_blur } },
-		{ "NEAR" },
-		{ depth_test = false, blending = "alpha"}
+		{ depth_test = false, blending = "alpha"},
+		{ "NEAR" }
 	)
 
 	env.setRenderTargets(tmp_rb)
-	env.drawArray(0, 4, env.dof_blur_shader, 
+	env.drawArray(0, 3, env.dof_blur_shader, 
 		{ 
 			input,
 			gbuffer_depth
 		},
-		{ { near_blur, near_sharp, far_sharp, far_blur } },
-		{ "HBLUR", "FAR" },
-		{ depth_test = false, blending = "alpha"}
+		{ depth_test = false, blending = "alpha"},
+		{ "HBLUR", "FAR" }
 	)
 
 	env.setRenderTargets(input)
-	env.drawArray(0, 4, env.dof_blur_shader, 
+	env.drawArray(0, 3, env.dof_blur_shader, 
 		{
 			tmp_rb,
 			gbuffer_depth
 		},
-		{ { near_blur, near_sharp, far_sharp, far_blur } },
-		{ "FAR" },
-		{ depth_test = false, blending = "alpha"}
+		{ depth_test = false, blending = "alpha"},
+		{ "FAR" }
 	)
 
 
 	env.setRenderTargets(tmp_rb)
-	env.drawArray(0, 4, env.dof_shader, 
+	env.drawArray(0, 3, env.dof_shader, 
 		{
 			input,
 			gbuffer_depth
@@ -79,4 +77,8 @@ end
 
 function onDestroy()
 	_G["postprocesses"]["dof"] = nil
+end
+
+function onUnload()
+	onDestroy()
 end

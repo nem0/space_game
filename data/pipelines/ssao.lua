@@ -1,66 +1,65 @@
 radius = 0.2
 intensity = 1
-local ssao_size = 1024
+use_temporal = false
+blur = false
+current_frame_weight = 0.05
+local history_buf = -1
 
-function blur(env, buffer, format, w, h, tmp_rb_dbg_name) 
-	local blur_buf = env.createRenderbuffer(w, h, false, format, tmp_rb_dbg_name)
-	env.setRenderTargets(blur_buf)
-	env.viewport(0, 0, w, h)
-	env.drawArray(0, 4, env.blur_shader
-		, { buffer }
-		, { {1.0 / w, 1.0 / h, 0, 0 }}
-		, "BLUR_H"
-		, { depth_test = false, depth_write = false }
-	)
-	env.setRenderTargets(buffer)
-	env.viewport(0, 0, w, h)
-	env.drawArray(0, 4, env.blur_shader
-		, { blur_buf }
-		, { {1.0 / w, 1.0 / h, 0, 0 } }
-		, {}
-		, { depth_test = false, depth_write = false }
-	)
-end
-
-function postprocess(env, transparent_phase, hdr_buffer, gbuffer0, gbuffer1, gbuffer_depth, shadowmap)
+function postprocess(env, phase, hdr_buffer, gbuffer0, gbuffer1, gbuffer2, gbuffer_depth, shadowmap)
 	if not enabled then return hdr_buffer end
-	if transparent_phase ~= "pre" then return hdr_buffer end
-	env.beginBlock("ssao")
-	if env.ssao_shader == nil then
-		env.ssao_shader = env.preloadShader("pipelines/ssao.shd")
+	if phase ~= "pre_lightpass" then return hdr_buffer end
+
+	env.ssao_shader = env.ssao_shader or env.preloadShader("pipelines/ssao.shd")
+	env.blur_shader = env.blur_shader or env.preloadShader("pipelines/blur.shd")
+	env.ssao_blit_shader = env.ssao_blit_shader or env.preloadShader("pipelines/ssao_blit.shd")
+	env.ssao_resolve_shader = env.ssao_resolve_shader or env.preloadShader("pipelines/ssao_resolve.shd")
+
+	local w = math.floor(env.viewport_w * 0.5)
+	local h = math.floor(env.viewport_h * 0.5)
+	local ssao_rb = env.createRenderbuffer { width = w, height = h, format = "r8", debug_name = "ssao", compute_write = true }
+
+	if use_temporal and history_buf == -1 then
+		history_buf = env.createRenderbuffer { width = w, height = h, format = "r8", debug_name = "ssao", compute_write = true }
+		env.setRenderTargets(history_buf)
+		env.clear(env.CLEAR_ALL, 1, 1, 1, 1, 0)
 	end
-	if env.blur_shader == nil then
-		env.blur_shader = env.preloadShader("pipelines/blur.shd")
+
+	env.setRenderTargets()
+
+	env.beginBlock("ssao " .. tostring(w) .. "x" .. tostring(h))
+	env.drawcallUniforms(radius, intensity, w, h)
+	env.bindTextures({gbuffer_depth, gbuffer1}, 0)
+	env.bindImageTexture(ssao_rb, 2)
+	env.dispatch(env.ssao_shader, (w + 15) / 16, (h + 15) / 16, 1)
+
+	if use_temporal then
+		env.beginBlock("ssao_resolve " .. tostring(w) .. "x" .. tostring(h))
+		env.drawcallUniforms( w, h, 0, 0, current_frame_weight, 0, 0, 0 )
+		env.bindTextures({gbuffer_depth, history_buf}, 0)
+		env.bindImageTexture(ssao_rb, 2)
+		env.dispatch(env.ssao_resolve_shader, (w + 15) / 16, (h + 15) / 16, 1)
+		env.endBlock()
+		if blur then
+			env.blur(ssao_rb, "r8", w, h, "ssao_blur")
+		end
+	else
+		if blur then
+			env.blur(ssao_rb, "r8", w, h, "ssao_blur")
+		end
 	end
-	if env.ssao_blit_shader == nil then
-		env.ssao_blit_shader = env.preloadShader("pipelines/ssao_blit.shd")
-	end
-	local ssao_rb = env.createRenderbuffer(ssao_size, ssao_size, false, "r8", "ssao")
-	env.setRenderTargets(ssao_rb)
-	local state = {
-		depth_write = false,
-		depth_test = false
-	}
-	env.viewport(0, 0, ssao_size, ssao_size)
-	env.drawArray(0
-		, 4
-		, env.ssao_shader
-		, { gbuffer_depth, gbuffer1 }
-		, { {radius, intensity, 0, 0} }
-		, {}
-		, state
-	)
-	blur(env, ssao_rb, "r8", ssao_size, ssao_size, "ssao_blur")
-	
-	env.setRenderTargets(hdr_buffer)
-	env.drawArray(0, 4, env.ssao_blit_shader
-		, { ssao_rb }
-		, {}
-		, {}
-		, { depth_test = false, depth_write = false, blending = "multiply" });
-		
+
+	env.beginBlock("ssao_blit " .. tostring(env.viewport_w) .. "x" .. tostring(env.viewport_h))
+	env.drawcallUniforms( env.viewport_w, env.viewport_h, 0, 0 )
+	env.bindTextures({ssao_rb}, 0)
+	env.bindImageTexture(gbuffer1, 1)
+	env.dispatch(env.ssao_blit_shader, (env.viewport_w + 15) / 16, (env.viewport_h + 15) / 16, 1)
 	env.endBlock()
-	return hdr_buffer
+	env.endBlock()
+
+	if use_temporal then
+		history_buf = ssao_rb
+		env.keepRenderbufferAlive(history_buf)
+	end
 end
 
 function awake()
@@ -70,4 +69,9 @@ end
 
 function onDestroy()
 	_G["postprocesses"]["ssao"] = nil
+end
+
+
+function onUnload()
+	onDestroy()
 end

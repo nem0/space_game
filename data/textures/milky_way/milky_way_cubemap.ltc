@@ -1,0 +1,37 @@
+cubemap(true)
+layer {
+	red = { path = "textures/milky_way/px.png", channel = 0, invert = false },
+	green = { path = "textures/milky_way/px.png", channel = 1, invert = false },
+	blue = { path = "textures/milky_way/px.png", channel = 2, invert = false },
+	alpha = { path = "textures/milky_way/px.png", channel = 3, invert = false },
+}
+layer {
+	red = { path = "textures/milky_way/nx.png", channel = 0, invert = false },
+	green = { path = "textures/milky_way/nx.png", channel = 1, invert = false },
+	blue = { path = "textures/milky_way/nx.png", channel = 2, invert = false },
+	alpha = { path = "textures/milky_way/nx.png", channel = 3, invert = false },
+}
+layer {
+	red = { path = "textures/milky_way/py.png", channel = 0, invert = false },
+	green = { path = "textures/milky_way/py.png", channel = 1, invert = false },
+	blue = { path = "textures/milky_way/py.png", channel = 2, invert = false },
+	alpha = { path = "textures/milky_way/py.png", channel = 3, invert = false },
+}
+layer {
+	red = { path = "textures/milky_way/ny.png", channel = 0, invert = false },
+	green = { path = "textures/milky_way/ny.png", channel = 1, invert = false },
+	blue = { path = "textures/milky_way/ny.png", channel = 2, invert = false },
+	alpha = { path = "textures/milky_way/ny.png", channel = 3, invert = false },
+}
+layer {
+	red = { path = "textures/milky_way/pz.png", channel = 0, invert = false },
+	green = { path = "textures/milky_way/pz.png", channel = 1, invert = false },
+	blue = { path = "textures/milky_way/pz.png", channel = 2, invert = false },
+	alpha = { path = "textures/milky_way/pz.png", channel = 3, invert = false },
+}
+layer {
+	red = { path = "textures/milky_way/nz.png", channel = 0, invert = false },
+	green = { path = "textures/milky_way/nz.png", channel = 1, invert = false },
+	blue = { path = "textures/milky_way/nz.png", channel = 2, invert = false },
+	alpha = { path = "textures/milky_way/nz.png", channel = 3, invert = false },
+}

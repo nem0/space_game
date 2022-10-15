@@ -13,6 +13,7 @@
 #include "lua_script/lua_script_system.h"
 #include "renderer/model.h"
 #include "renderer/render_scene.h"
+#include <cstdio>
 
 using namespace Lumix;
 
@@ -61,6 +62,28 @@ struct CrewMember {
 
 struct Module {
 	Module(IAllocator& allocator) : extensions(allocator) {}
+
+	void serialize(OutputMemoryStream& blob) {
+		blob.write(id);
+		blob.write(entity);
+		blob.write(build_progress);
+		blob.write(extensions.size());
+		for (const Extension* e : extensions) {
+			blob.write(*e);
+		}
+	}
+
+	void deserialize(InputMemoryStream& blob, IAllocator& allocator) {
+		blob.read(id);
+		blob.read(entity);
+		blob.read(build_progress);
+		const i32 size = blob.read<i32>();
+		extensions.resize(size);
+		for (Extension*& e : extensions) {
+			e = LUMIX_NEW(allocator, Extension);
+			blob.read(*e);
+		}
+	}
 
 	u32 id;
 	EntityRef entity;
@@ -122,18 +145,17 @@ struct Game : IPlugin {
 	Game(Engine& engine)
 		: m_engine(engine)
 	{
-		// TODO this does not work if the asset is not precompiled at this time, since asset compiler is not hooked at this point
 		ResourceManagerHub& rm = m_engine.getResourceManager();
-		//m_assets.module_2 = rm.load<PrefabResource>(Path("prefabs/module_2.fab"));
+		m_assets.module_2 = rm.load<PrefabResource>(Path("prefabs/module_2.fab"));
 		//m_assets.module_3 = rm.load<PrefabResource>(Path("prefabs/module_3.fab"));
 		//m_assets.module_4 = rm.load<PrefabResource>(Path("prefabs/module_4.fab"));
-		//m_assets.solar_panel = rm.load<PrefabResource>(Path("prefabs/solar_panel.fab"));
+		m_assets.solar_panel = rm.load<PrefabResource>(Path("prefabs/solar_panel.fab"));
 	}
 
 	~Game() {
 		m_assets.module_2->decRefCount();
-		m_assets.module_3->decRefCount();
-		m_assets.module_4->decRefCount();
+		if (m_assets.module_3) m_assets.module_3->decRefCount();
+		if (m_assets.module_4) m_assets.module_4->decRefCount();
 		m_assets.solar_panel->decRefCount();
 	}
 
@@ -159,6 +181,7 @@ struct GameScene : IScene {
 		, m_blueprints(game.m_engine.getAllocator())
 	{
 		lua_State* L = m_game.m_engine.getState();
+		LuaWrapper::createSystemClosure(L, "Game", this, "signal", lua_signal);
 		LuaWrapper::createSystemClosure(L, "Game", this, "getStationStats", lua_getStationStats);
 		LuaWrapper::createSystemClosure(L, "Game", this, "getModule", lua_getModule);
 		LuaWrapper::createSystemClosure(L, "Game", this, "getBlueprints", lua_getBlueprints);
@@ -430,6 +453,13 @@ It produces 20 000 kcal/day of food.)#");
 		return 1;
 	}
 
+	static int lua_signal(lua_State* L) {
+		const char* signal = LuaWrapper::checkArg<const char*>(L, 1);
+		GameScene* game = getClosureScene(L);
+		if (!game) return 0;
+		if (equalStrings(signal, "close_module_ui")) game->m_selected_module = nullptr;
+		return 0;
+	}
 	static int lua_getStationStats(lua_State* L) {
 		GameScene* game = getClosureScene(L);
 		if (!game) return 0;
@@ -479,13 +509,17 @@ It produces 20 000 kcal/day of food.)#");
 		scene->mousedButtonUnhandled().bind<&GameScene::onMouseButton>(this);
 
 		((GUISystem&)scene->getPlugin()).enableCursor(true);
+		
+		const EntityPtr gui = m_universe.findByName(INVALID_ENTITY, "gui");
+		scene->enableRect(*m_universe.findByName(gui, "moduleui"), false);
 	}
 
 	void startGame() override {
-		m_time_multiplier = 0;
+		m_time_multiplier = 1;
 		m_angle = PI * 0.5f;
 		m_ref_point = (EntityRef)m_universe.findByName(INVALID_ENTITY, "ref_point");
 		m_camera = (EntityRef)m_universe.findByName(m_ref_point, "camera");
+		m_hud = (EntityRef)m_universe.findByName(m_universe.findByName(INVALID_ENTITY, "gui"), "hud");
 		
 		Module* m = addModule(*m_game.m_assets.module_2);
 		m_universe.setRotation(m->entity, Quat::vec3ToVec3(Vec3(0, 1, 0), Vec3(0, 0, 1)));
@@ -530,11 +564,16 @@ It produces 20 000 kcal/day of food.)#");
 		}
 	}
 
+	EntityPtr getEntity(const char* parent, const char* child) const {
+		const EntityPtr e = m_universe.findByName(INVALID_ENTITY, parent);
+		if (!e.isValid()) return INVALID_ENTITY;
+
+		return m_universe.findByName(*e, child);
+	}
+
 	void selectModule(Module& m) {
 		m_selected_module = &m;
-		if (LuaScriptScene::IFunctionCall* call = getLuaScene().beginFunctionCall(m.entity, 0, "selected")) {
-			getLuaScene().endFunctionCall();
-		}
+		getGUIScene().enableRect(*getEntity("gui", "moduleui"), true);
 	}
 
 	void selectModule(EntityRef e) {
@@ -747,6 +786,8 @@ It produces 20 000 kcal/day of food.)#");
 		static bool is_left = false;
 		static bool is_right = false;
 		static bool is_fast = false;
+		static bool is_q = false;
+		static bool is_e = false;
 
 		Quat rot = m_universe.getRotation(m_camera);
 		const Vec3 up = rot.rotate(Vec3(0, 1, 0));
@@ -762,6 +803,8 @@ It produces 20 000 kcal/day of food.)#");
 					if (e.device->type == InputSystem::Device::MOUSE) {
 						if (e.data.button.key_id == 1) {
 							is_rmb_down = e.data.button.down;
+							((GUISystem&)getGUIScene().getPlugin()).enableCursor(!is_rmb_down);
+
 						}
 					}
 					else {
@@ -770,15 +813,18 @@ It produces 20 000 kcal/day of food.)#");
 							case 'S': is_backward = e.data.button.down; break;
 							case 'A': is_left = e.data.button.down; break;
 							case 'D': is_right = e.data.button.down; break;
+							case 'Q': is_q = e.data.button.down; break;
+							case 'E': is_e = e.data.button.down; break;
 							case (u32)os::Keycode::SHIFT: is_fast = e.data.button.down; break;
 						}
 					}
 					break;
 				case InputSystem::Event::AXIS:
 					if (is_rmb_down) {
-						const Quat drot = Quat(up, -e.data.axis.x * 0.003f);
-						const Quat drotx = Quat(side, -e.data.axis.y * 0.003f);
-						m_universe.setRotation(m_camera, normalize(drotx * drot * rot));
+						const Quat drot = Quat(up, -e.data.axis.x * 0.006f);
+						const Quat drotx = Quat(side, -e.data.axis.y * 0.006f);
+						rot = normalize(drotx * drot * rot);
+						m_universe.setRotation(m_camera, rot);
 					}
 					break;
 			}
@@ -792,9 +838,66 @@ It produces 20 000 kcal/day of food.)#");
 		if (squaredLength(move) > 0.1f) {
 			move = rot.rotate(move);
 			DVec3 p = m_universe.getPosition(m_camera);
-			p += move * time_delta * (is_fast ? 100.f : 10.f);
+			p += move * time_delta * (is_fast ? 100.f : 30.f);
 			m_universe.setPosition(m_camera, p);
 		}
+		if (is_q || is_e) {
+			const Quat drot = Quat(cross(up, side), is_e ? time_delta : -time_delta);
+			m_universe.setRotation(m_camera, normalize(drot * rot));
+		}
+	}
+	
+	void beforeReload(OutputMemoryStream& blob) override {
+		blob.write(m_is_game_started);
+		blob.write(m_time_multiplier);
+		blob.write(m_angle);
+		blob.write(m_ref_point);
+		blob.write(m_camera);
+		blob.write(m_hud);
+		blob.write(m_station.stats);
+		blob.writeArray(m_station.crew);
+		blob.write(m_station.modules.size());
+		for (Module* m : m_station.modules) {
+			m->serialize(blob);
+		}
+		
+		GUIScene* gui_scene = (GUIScene*)m_universe.getScene(GUI_BUTTON_TYPE);
+		gui_scene->mousedButtonUnhandled().unbind<&GameScene::onMouseButton>(this);
+	}
+	
+	void afterReload(InputMemoryStream& blob) override {
+		blob.read(m_is_game_started);
+		blob.read(m_time_multiplier);
+		blob.read(m_angle);
+		blob.read(m_ref_point);
+		blob.read(m_camera);
+		blob.read(m_hud);
+		blob.read(m_station.stats);
+		blob.readArray(&m_station.crew);
+		const i32 size = blob.read<i32>();
+		m_station.modules.resize(size);
+		for (Module*& m : m_station.modules) {
+			m = LUMIX_NEW(m_allocator, Module)(m_allocator);
+			m->deserialize(blob, m_allocator);
+		}
+		
+		initGUI();
+	}
+
+	void setText(EntityRef parent, const char* child, const char* format, u32 value) {
+		char buf[64];
+		sprintf_s(buf, format, value);
+		const EntityPtr e = m_universe.findByName(parent, child);
+		ASSERT(e.isValid());
+		getGUIScene().setText(*e, buf);
+	}
+
+	void updateHUD() {
+		setText(m_hud, "air", "%d l/h", u32(m_station.stats.production.air + m_station.stats.consumption.air));
+		setText(m_hud, "water", "%d l/day", u32(m_station.stats.production.water + m_station.stats.consumption.water));
+		setText(m_hud, "food", "%d kcal/day", u32(m_station.stats.production.food + m_station.stats.consumption.food));
+		setText(m_hud, "power", "%d kW", u32(m_station.stats.production.power + m_station.stats.consumption.power));
+		setText(m_hud, "heat", "%d kJ/s", u32(m_station.stats.production.heat + m_station.stats.consumption.heat));
 	}
 
 	void update(float time_delta, bool paused) override {
@@ -813,6 +916,7 @@ It produces 20 000 kcal/day of food.)#");
 		m_universe.setRotation(m_ref_point, Quat({0, 1, 0}, -m_angle + PI * 0.5f));
 
 		updateCamera(time_delta);
+		updateHUD();
 
 		for (CrewMember& c : m_station.crew) {
 			if (c.state == CrewMember::BUILDING) {
@@ -917,6 +1021,7 @@ It produces 20 000 kcal/day of food.)#");
 	Universe& m_universe;
 	SpaceStation m_station;
 	EntityRef m_camera;
+	EntityRef m_hud;
 	EntityRef m_ref_point;
 	float m_angle = 0;
 	

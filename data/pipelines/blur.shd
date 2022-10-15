@@ -1,3 +1,5 @@
+include "pipelines/common.glsl"
+
 vertex_shader [[
 	layout(std140, binding = 4) uniform Drawcall {
 		uniform vec4 u_inv_sm_size;
@@ -6,7 +8,8 @@ vertex_shader [[
 	layout (location = 1) out vec4 v_tc1;
 	layout (location = 2) out vec4 v_tc2;
 	void main() {
-		vec2 uv = vec2(gl_VertexID & 1, (gl_VertexID & 2) * 0.5);
+		vec2 uv;
+		gl_Position = fullscreenQuad(gl_VertexID, uv);
 		v_tc0 = uv;
 		#ifdef BLUR_H
 			v_tc1 = vec4(
@@ -27,9 +30,6 @@ vertex_shader [[
 				uv.x, uv.y - 3.2307692308 * u_inv_sm_size.y
 			);
 		#endif
-	
-		vec4 pos = vec4((gl_VertexID & 1) * 2 - 1, -(gl_VertexID & 2) + 1, 0, 1);
-		gl_Position = pos;
 	}
 ]]
 
