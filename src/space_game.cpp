@@ -44,6 +44,11 @@ using BlueprintHandle = u32;
 
 
 struct Extension {
+	enum class Type {
+		NONE,
+		EXT,
+		HATCH
+	};
 	u32 id;
 	EntityPtr entity;
 	float build_progress = 0.f;
@@ -147,13 +152,13 @@ struct Game : IPlugin {
 	{
 		ResourceManagerHub& rm = m_engine.getResourceManager();
 		m_assets.module_2 = rm.load<PrefabResource>(Path("prefabs/module_2.fab"));
-		//m_assets.module_3 = rm.load<PrefabResource>(Path("prefabs/module_3.fab"));
+		m_assets.module_3 = rm.load<PrefabResource>(Path("prefabs/module_3.fab"));
 		//m_assets.module_4 = rm.load<PrefabResource>(Path("prefabs/module_4.fab"));
 		m_assets.solar_panel = rm.load<PrefabResource>(Path("prefabs/solar_panel.fab"));
 	}
 
 	~Game() {
-		m_assets.module_2->decRefCount();
+		if (m_assets.module_2) m_assets.module_2->decRefCount();
 		if (m_assets.module_3) m_assets.module_3->decRefCount();
 		if (m_assets.module_4) m_assets.module_4->decRefCount();
 		m_assets.solar_panel->decRefCount();
@@ -457,9 +462,40 @@ It produces 20 000 kcal/day of food.)#");
 		const char* signal = LuaWrapper::checkArg<const char*>(L, 1);
 		GameScene* game = getClosureScene(L);
 		if (!game) return 0;
-		if (equalStrings(signal, "close_module_ui")) game->m_selected_module = nullptr;
+		
+		game->signal(signal);
 		return 0;
 	}
+
+	void signal(const char* value) {
+		if (equalStrings(value, "close_module_ui")) m_selected_module = nullptr;
+		else if (equalStrings(value, "build_module2")) {
+			ASSERT(!m_build_preview.isValid());
+			EntityMap entity_map(m_allocator);
+			m_build_ext_type = Extension::Type::HATCH;
+			const bool created = m_game.m_engine.instantiatePrefab(m_universe, *m_game.m_assets.module_2, { 0, 0, 0 }, Quat::IDENTITY, 1.f, entity_map);
+			m_build_preview = entity_map.m_map[0];
+			m_build_prefab = m_game.m_assets.module_2;
+			return;
+		}
+		else if (equalStrings(value, "build_module3")) {
+			ASSERT(!m_build_preview.isValid());
+			EntityMap entity_map(m_allocator);
+			const bool created = m_game.m_engine.instantiatePrefab(m_universe, *m_game.m_assets.module_3, { 0, 0, 0 }, Quat::IDENTITY, 1.f, entity_map);
+			m_build_preview = entity_map.m_map[0];
+			m_build_prefab = m_game.m_assets.module_3;
+			return;
+		}
+		else if (equalStrings(value, "build_module4")) {
+			ASSERT(!m_build_preview.isValid());
+			EntityMap entity_map(m_allocator);
+			const bool created = m_game.m_engine.instantiatePrefab(m_universe, *m_game.m_assets.module_4, { 0, 0, 0 }, Quat::IDENTITY, 1.f, entity_map);
+			m_build_preview = entity_map.m_map[0];
+			m_build_prefab = m_game.m_assets.module_4;
+			return;
+		}
+	}
+
 	static int lua_getStationStats(lua_State* L) {
 		GameScene* game = getClosureScene(L);
 		if (!game) return 0;
@@ -626,15 +662,15 @@ It produces 20 000 kcal/day of food.)#");
 		const Vec3 N = ref_tr.rot.rotate(Vec3(0, 0, 1));
 
 		if (m_build_preview.isValid()) {
-			/*float t;
-			if (getRayPlaneIntersecion(origin.toFloat(), dir, ref_tr.pos.toFloat(), N, t)) {
+			float t;
+			if (getRayPlaneIntersecion(Vec3(origin), dir, Vec3(ref_tr.pos), N, t)) {
 				const DVec3 p = origin + dir * t;
-				if (m_build_ext_type != Extension::Type::NONE) {
+				if (m_build_ext_type == Extension::Type::EXT) {
 					const Pin pin = getClosestPin(p, 5, "ext_");
 					if (pin.module) {
-						Extension* ext = addExtension(*pin.module, m_build_ext_type, pin.pin);
-						const Transform tr = getPinnedTransform((EntityRef)pin.pin, (EntityRef)m_build_preview, (EntityRef)ext->entity);
-						m_universe.setTransform((EntityRef)ext->entity, tr);
+						//Extension* ext = addExtension(*pin.module, m_build_ext_type, pin.pin);
+						//const Transform tr = getPinnedTransform((EntityRef)pin.pin, (EntityRef)m_build_preview, (EntityRef)ext->entity);
+						//m_universe.setTransform((EntityRef)ext->entity, tr);
 					}
 				}
 				else {
@@ -649,8 +685,7 @@ It produces 20 000 kcal/day of food.)#");
 			}
 			destroyChildren((EntityRef)m_build_preview);
 			m_universe.destroyEntity((EntityRef)m_build_preview);
-			m_build_preview = INVALID_ENTITY;*/
-			ASSERT(false);
+			m_build_preview = INVALID_ENTITY;
 		}
 
 		const RayCastModelHit hit = getRenderScene().castRay(origin, dir, INVALID_ENTITY);
@@ -981,7 +1016,6 @@ It produces 20 000 kcal/day of food.)#");
 	void updateBuildPreview() {
 		if (!m_build_preview.isValid()) return;
 
-		ASSERT(false);/*
 		const IVec2 mp = getGUIScene().getCursorPosition();
 
 		const Viewport& vp = getRenderScene().getCameraViewport(m_camera);
@@ -993,9 +1027,9 @@ It produces 20 000 kcal/day of food.)#");
 
 		float t;
 
-		if (getRayPlaneIntersecion(origin.toFloat(), dir, ref_tr.pos.toFloat(), N, t)) {
+		if (getRayPlaneIntersecion(Vec3(origin), dir, Vec3(ref_tr.pos), N, t)) {
 			const DVec3 p = origin + dir * t;
-			const bool is_ext = m_build_ext_type != Extension::Type::NONE;
+			const bool is_ext = m_build_ext_type == Extension::Type::EXT;
 			const Pin pin = getClosestPin(p, 5, is_ext ? "ext_" : "hatch_");
 			if (pin.module) {
 				if (is_ext) {
@@ -1011,7 +1045,7 @@ It produces 20 000 kcal/day of food.)#");
 			}
 
 			m_universe.setPosition((EntityRef)m_build_preview, p);
-		}*/
+		}
 	}
 
 	bool m_is_game_started = false;
@@ -1027,7 +1061,7 @@ It produces 20 000 kcal/day of food.)#");
 	
 	EntityPtr m_build_preview = INVALID_ENTITY;
 	PrefabResource* m_build_prefab = nullptr;
-	//Extension::Type m_build_ext_type = Extension::Type::NONE;
+	Extension::Type m_build_ext_type = Extension::Type::NONE;
 
 	Module* m_selected_module = nullptr;
 	u32 m_id_generator = 0;
