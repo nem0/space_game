@@ -610,6 +610,12 @@ It produces 20 000 kcal/day of food.)#");
 	void selectModule(Module& m) {
 		m_selected_module = &m;
 		getGUIScene().enableRect(*getEntity("gui", "moduleui"), true);
+
+		if (m.build_progress < 1) {
+			for (const CrewMember& c : m_station.crew) {
+
+			}
+		}
 	}
 
 	void selectModule(EntityRef e) {
