@@ -7,7 +7,7 @@
 #include "engine/profiler.h"
 #include "engine/reflection.h"
 #include "engine/resource_manager.h"
-#include "engine/universe.h"
+#include "engine/world.h"
 #include "gui/gui_scene.h"
 #include "gui/gui_system.h"
 #include "lua_script/lua_script_system.h"
@@ -42,6 +42,83 @@ struct Blueprint {
 } blueprint;
 using BlueprintHandle = u32;
 
+struct PropertyCloner : reflection::IPropertyVisitor {
+	template <typename T>
+	void clone(const reflection::Property<T>& prop) { 
+		if (!prop.setter) return;
+		prop.set(dst, index, prop.get(src, index));
+	}
+
+	void visit(const reflection::Property<float>& prop) override { clone(prop); }
+	void visit(const reflection::Property<int>& prop) override { clone(prop); }
+	void visit(const reflection::Property<u32>& prop) override { clone(prop); }
+	void visit(const reflection::Property<EntityPtr>& prop) override { 
+		if (!prop.setter) return;
+
+		EntityPtr e = prop.get(src, index);
+		auto iter = map->find(e);
+		if (iter.isValid()) {
+			e = iter.value();
+		}
+		else {
+			e = INVALID_ENTITY;
+		}
+		prop.set(dst, index, e);
+	}
+	void visit(const reflection::Property<Vec2>& prop) override { clone(prop); }
+	void visit(const reflection::Property<Vec3>& prop) override { clone(prop); }
+	void visit(const reflection::Property<IVec3>& prop) override { clone(prop); }
+	void visit(const reflection::Property<Vec4>& prop) override { clone(prop); }
+	void visit(const reflection::Property<Path>& prop) override { clone(prop); }
+	void visit(const reflection::Property<bool>& prop) override { clone(prop); }
+	void visit(const reflection::Property<const char*>& prop) override { clone(prop); }
+		
+	void visit(const reflection::ArrayProperty& prop) override {
+		const u32 c = prop.getCount(src);
+		while (prop.getCount(dst) < c) { prop.addItem(dst, prop.getCount(dst) - 1); }
+		while (prop.getCount(dst) > c) { prop.removeItem(dst, prop.getCount(dst) - 1); }
+			
+		ASSERT(index == -1);
+		for (u32 i = 0; i < c; ++i) {
+			index = i;
+			prop.visitChildren(*this);
+		}
+		index = -1;
+	}
+		
+	void visit(const reflection::DynamicProperties& prop) override { 
+		for (u32 i = 0, c = prop.getCount(src, index); i < c; ++i) {
+			const char* name = prop.getName(src, index, i);
+			reflection::DynamicProperties::Type type = prop.getType(src, index, i);
+			reflection::DynamicProperties::Value val = prop.getValue(src, index, i);
+			if (type == reflection::DynamicProperties::ENTITY) {
+				auto iter = map->find(val.e);
+				if (iter.isValid()) {
+					val.e = iter.value();
+				}
+				else {
+					val.e = INVALID_ENTITY;
+				}
+			}
+			prop.set(dst, index, name, type, val);
+		}
+	}
+		
+
+	void visit(const reflection::BlobProperty& prop) override { 
+		OutputMemoryStream tmp(*allocator);
+		prop.getValue(src, index, tmp);
+		InputMemoryStream blob(tmp);
+		prop.setValue(dst, index, blob);
+	}
+		
+
+	const HashMap<EntityPtr, EntityPtr>* map; 
+	IAllocator* allocator;
+	ComponentUID src;
+	ComponentUID dst;
+	int index = -1;
+};
 
 struct Extension {
 	enum class Type {
@@ -168,7 +245,7 @@ struct Game : IPlugin {
 	void serialize(OutputMemoryStream& stream) const override {}
 	bool deserialize(u32 version, InputMemoryStream& stream) override { return version == 0; }
 
-	void createScenes(Universe& universe) override;
+	void createScenes(World& world) override;
 
 	const char* getName() const override { return "game"; }
 
@@ -178,14 +255,25 @@ struct Game : IPlugin {
 
 
 struct GameScene : IScene {
-	GameScene(Game& game, Universe& universe) 
+	GameScene(Game& game, World& world) 
 		: m_game(game)
-		, m_universe(universe)
+		, m_universe(world)
 		, m_station(game.m_engine.getAllocator())
 		, m_allocator(game.m_engine.getAllocator())
 		, m_blueprints(game.m_engine.getAllocator())
+		, m_button_callbacks(game.m_engine.getAllocator())
 	{
 		lua_State* L = m_game.m_engine.getState();
+		#define REGISTER_FUNCTION(F)                                                                                    \
+			do                                                                                                          \
+			{                                                                                                           \
+				auto f = &LuaWrapper::wrapMethodClosure<&GameScene::F>; \
+				LuaWrapper::createSystemClosure(L, "Game", this, #F, f);                                              \
+			} while (false)
+
+			REGISTER_FUNCTION(getBuildProgress);
+		#undef REGISTER_FUNCTION
+
 		LuaWrapper::createSystemClosure(L, "Game", this, "signal", lua_signal);
 		LuaWrapper::createSystemClosure(L, "Game", this, "getStationStats", lua_getStationStats);
 		LuaWrapper::createSystemClosure(L, "Game", this, "getModule", lua_getModule);
@@ -242,6 +330,11 @@ It produces 20 000 kcal/day of food.)#");
 		#undef EXT
 	}
 
+	float getBuildProgress() {
+		if (!m_selected_module) return 0;
+		return m_selected_module->build_progress;
+	}
+
 	static int lua_onGUIEvent(lua_State* L) {
 		const char* event_name = LuaWrapper::checkArg<const char*>(L, 1);
 		GameScene* game = getClosureScene(L);
@@ -283,7 +376,7 @@ It produces 20 000 kcal/day of food.)#");
 		if (event_hash == build_module_2_event) {
 			ASSERT(!m_build_preview.isValid());
 			EntityMap entity_map(m_allocator);
-			const bool created = m_game.m_engine.instantiatePrefab(m_universe, *m_game.m_assets.module_2, {0, 0, 0}, Quat::IDENTITY, 1.f, entity_map);
+			const bool created = m_game.m_engine.instantiatePrefab(m_universe, *m_game.m_assets.module_2, {0, 0, 0}, Quat::IDENTITY, Vec3(1.f), entity_map);
 			m_build_preview = entity_map.m_map[0];
 			m_build_prefab = m_game.m_assets.module_2;
 			return;
@@ -291,7 +384,7 @@ It produces 20 000 kcal/day of food.)#");
 		if (event_hash == build_module_3_event) {
 			ASSERT(!m_build_preview.isValid());
 			EntityMap entity_map(m_allocator);
-			const bool created = m_game.m_engine.instantiatePrefab(m_universe, *m_game.m_assets.module_3, {0, 0, 0}, Quat::IDENTITY, 1.f, entity_map);
+			const bool created = m_game.m_engine.instantiatePrefab(m_universe, *m_game.m_assets.module_3, {0, 0, 0}, Quat::IDENTITY, Vec3(1.f), entity_map);
 			m_build_preview = entity_map.m_map[0];
 			m_build_prefab = m_game.m_assets.module_3;
 			return;
@@ -299,7 +392,7 @@ It produces 20 000 kcal/day of food.)#");
 		if (event_hash == build_module_4_event) {
 			ASSERT(!m_build_preview.isValid());
 			EntityMap entity_map(m_allocator);
-			const bool created = m_game.m_engine.instantiatePrefab(m_universe, *m_game.m_assets.module_4, {0, 0, 0}, Quat::IDENTITY, 1.f, entity_map);
+			const bool created = m_game.m_engine.instantiatePrefab(m_universe, *m_game.m_assets.module_4, {0, 0, 0}, Quat::IDENTITY, Vec3(1.f), entity_map);
 			m_build_preview = entity_map.m_map[0];
 			m_build_prefab = m_game.m_assets.module_4;
 			return;
@@ -473,7 +566,7 @@ It produces 20 000 kcal/day of food.)#");
 			ASSERT(!m_build_preview.isValid());
 			EntityMap entity_map(m_allocator);
 			m_build_ext_type = Extension::Type::HATCH;
-			const bool created = m_game.m_engine.instantiatePrefab(m_universe, *m_game.m_assets.module_2, { 0, 0, 0 }, Quat::IDENTITY, 1.f, entity_map);
+			const bool created = m_game.m_engine.instantiatePrefab(m_universe, *m_game.m_assets.module_2, { 0, 0, 0 }, Quat::IDENTITY, Vec3(1.f), entity_map);
 			m_build_preview = entity_map.m_map[0];
 			m_build_prefab = m_game.m_assets.module_2;
 			return;
@@ -481,7 +574,7 @@ It produces 20 000 kcal/day of food.)#");
 		else if (equalStrings(value, "build_module3")) {
 			ASSERT(!m_build_preview.isValid());
 			EntityMap entity_map(m_allocator);
-			const bool created = m_game.m_engine.instantiatePrefab(m_universe, *m_game.m_assets.module_3, { 0, 0, 0 }, Quat::IDENTITY, 1.f, entity_map);
+			const bool created = m_game.m_engine.instantiatePrefab(m_universe, *m_game.m_assets.module_3, { 0, 0, 0 }, Quat::IDENTITY, Vec3(1.f), entity_map);
 			m_build_preview = entity_map.m_map[0];
 			m_build_prefab = m_game.m_assets.module_3;
 			return;
@@ -489,7 +582,7 @@ It produces 20 000 kcal/day of food.)#");
 		else if (equalStrings(value, "build_module4")) {
 			ASSERT(!m_build_preview.isValid());
 			EntityMap entity_map(m_allocator);
-			const bool created = m_game.m_engine.instantiatePrefab(m_universe, *m_game.m_assets.module_4, { 0, 0, 0 }, Quat::IDENTITY, 1.f, entity_map);
+			const bool created = m_game.m_engine.instantiatePrefab(m_universe, *m_game.m_assets.module_4, { 0, 0, 0 }, Quat::IDENTITY, Vec3(1.f), entity_map);
 			m_build_preview = entity_map.m_map[0];
 			m_build_prefab = m_game.m_assets.module_4;
 			return;
@@ -529,7 +622,7 @@ It produces 20 000 kcal/day of food.)#");
 	}
 
 	IPlugin& getPlugin() const override { return m_game; }
-	struct Universe& getUniverse() override { return m_universe; }
+	struct World& getWorld() override { return m_universe; }
 
 	void serialize(OutputMemoryStream& serializer) override {}
 	void deserialize(InputMemoryStream& serialize, const EntityMap& entity_map, i32 version) override {}
@@ -548,6 +641,29 @@ It produces 20 000 kcal/day of food.)#");
 		
 		const EntityPtr gui = m_universe.findByName(INVALID_ENTITY, "gui");
 		scene->enableRect(*m_universe.findByName(gui, "moduleui"), false);
+
+		scene->buttonClicked().bind<&GameScene::onGUIButtonClicked>(this);
+	}
+
+	void onGUIButtonClicked(EntityRef entity) {
+		auto iter = m_button_callbacks.find(entity);
+		if (iter.isValid()) iter.value()->invoke();
+	}
+
+	template <typename T>
+	void setButtonCallback(EntityRef entity, T&& callback) {
+		struct MyCallback : ButtonCallback {
+			MyCallback(T&& callback) 
+				: callback(static_cast<T&&>(callback))
+			{}
+
+			void invoke() override { callback(); }
+
+			T callback;
+		};
+
+		UniquePtr<ButtonCallback> ptr = UniquePtr<MyCallback>::create(m_allocator, static_cast<T&&>(callback));
+		m_button_callbacks.insert(entity, ptr.move());
 	}
 
 	void startGame() override {
@@ -568,10 +684,13 @@ It produces 20 000 kcal/day of food.)#");
 		addExtension(*m, "sleeping_quarter", INVALID_ENTITY)->build_progress = 1;
 		CrewMember& c0 = m_station.crew.emplace();
 		CrewMember& c1 = m_station.crew.emplace();
+		CrewMember& c2 = m_station.crew.emplace();
 		c0.id = ++m_id_generator;
 		c0.name = "Donald Trump";
 		c1.id = ++m_id_generator;
 		c1.name = "Alber Einstein";
+		c2.id = ++m_id_generator;
+		c2.name = "Vladimir Putin";
 
 		m_station.stats.stored.water = 300;
 		m_station.stats.stored.food = 450'000;
@@ -587,6 +706,7 @@ It produces 20 000 kcal/day of food.)#");
 		m_is_game_started = false;
 		GUIScene* scene = (GUIScene*)m_universe.getScene(GUI_BUTTON_TYPE);
 		scene->mousedButtonUnhandled().unbind<&GameScene::onMouseButton>(this);
+		scene->buttonClicked().unbind<&GameScene::onGUIButtonClicked>(this);
 	}
 
 	void destroyChildren(EntityRef e) {
@@ -607,14 +727,99 @@ It produces 20 000 kcal/day of food.)#");
 		return m_universe.findByName(*e, child);
 	}
 
+	EntityRef findByName(EntityRef parent, const char* child) const {
+		return *m_universe.findByName(parent, child);
+	}
+
+	EntityRef duplicate(EntityRef src) {
+		HashMap<EntityPtr, EntityPtr> map(m_allocator);
+		return duplicate(src, m_universe.getParent(src), map);
+	}
+
+	void cloneComponent(const ComponentUID& cmp, EntityRef dst, HashMap<EntityPtr, EntityPtr>& map) {
+		m_universe.createComponent(cmp.type, dst);
+
+		const reflection::ComponentBase* cmp_tpl = reflection::getComponent(cmp.type);
+	
+		PropertyCloner property_cloner;
+		property_cloner.allocator = &m_allocator;
+		property_cloner.src = cmp;
+		property_cloner.dst.type = cmp.type;
+		property_cloner.dst.entity = dst;
+		property_cloner.dst.scene = cmp.scene;
+		property_cloner.map = &map;
+		cmp_tpl->visit(property_cloner);
+	}
+
+	EntityRef duplicate(EntityRef src, EntityPtr parent, HashMap<EntityPtr, EntityPtr>& map) {
+		const EntityRef e = m_universe.createEntity({}, {});
+		const char* name = m_universe.getEntityName(src);
+		if (name[0]) m_universe.setEntityName(e, name);
+
+		m_universe.setParent(parent, e);
+		for (ComponentUID cmp = m_universe.getFirstComponent(src); cmp.isValid(); cmp = m_universe.getNextComponent(cmp)) {
+			cloneComponent(cmp, e, map);
+		}
+
+		for (EntityPtr c = m_universe.getFirstChild(src); c.isValid(); c = m_universe.getNextSibling(*c)) {
+			duplicate(*c, e, map);
+		}
+
+		return e;
+	}
+
+	void destroy(EntityRef e) {
+		while (EntityPtr c = m_universe.getFirstChild(e)) {
+			destroy(*c);
+		}
+		m_universe.destroyEntity(e);
+	}
+
+	void gridLayout(EntityRef root) {
+		GUIScene& gui_scene = getGUIScene();
+		u32 i = 0;
+		for (EntityRef c : m_universe.childrenOf(root)) {
+			if (!gui_scene.isRectEnabled(c)) continue;
+
+			gui_scene.setRectTopRelative(c, 0);
+			gui_scene.setRectTopPoints(c, (i / 2) * 70.f);
+			gui_scene.setRectBottomRelative(c, 0);
+			gui_scene.setRectBottomPoints(c, (i / 2) * 70.f + 64.f);
+
+			gui_scene.setRectLeftRelative(c, (i % 2) * 0.5f);
+			gui_scene.setRectLeftPoints(c, 0);
+			gui_scene.setRectRightRelative(c, (i % 2) * 0.5f + 0.5f);
+			gui_scene.setRectRightPoints(c, 0);
+
+			++i;
+		}
+	}
+
 	void selectModule(Module& m) {
 		m_selected_module = &m;
-		getGUIScene().enableRect(*getEntity("gui", "moduleui"), true);
+		const EntityRef module_ui = *getEntity("gui", "moduleui");
+		GUIScene& gui_scene = getGUIScene();
+		gui_scene.enableRect(module_ui, true);
 
 		if (m.build_progress < 1) {
-			for (const CrewMember& c : m_station.crew) {
-
+			const EntityRef templ = findByName(module_ui, "crew", "template");
+			while (EntityPtr s = m_universe.getNextSibling(templ)) {
+				destroy(*s);
 			}
+
+			for (CrewMember& c : m_station.crew) {
+				const EntityRef e = duplicate(templ);
+				const EntityRef name = findByName(e, "name");
+				gui_scene.setText(name, c.name);
+				gui_scene.enableRect(e, true);
+				setButtonCallback(findByName(e, "assign_button"), [&c, &m](){
+					c.state = CrewMember::State::BUILDING;
+					c.subject = m.id;
+				});
+			}
+
+			gui_scene.enableRect(templ, false);
+			gridLayout(*m_universe.getParent(templ));
 		}
 	}
 
@@ -716,7 +921,7 @@ It produces 20 000 kcal/day of food.)#");
 		Module* m = LUMIX_NEW(m_allocator, Module)(m_allocator);
 		m->id = ++m_id_generator;
 		EntityMap entity_map(m_allocator);
-		const bool created = m_game.m_engine.instantiatePrefab(m_universe, prefab, {0, 0, 0}, Quat::IDENTITY, 1.f, entity_map);
+		const bool created = m_game.m_engine.instantiatePrefab(m_universe, prefab, {0, 0, 0}, Quat::IDENTITY, Vec3(1.f), entity_map);
 		m->entity = (EntityRef)entity_map.m_map[0];
 		m_universe.setParent(m_ref_point, m->entity);
 		m_universe.setLocalPosition(m->entity, {0, 0, 0});
@@ -733,7 +938,7 @@ It produces 20 000 kcal/day of food.)#");
 
 		if (m_blueprints[bp].prefab) {
 			EntityMap entity_map(m_allocator);
-			bool res = m_game.m_engine.instantiatePrefab(m_universe, *m_blueprints[bp].prefab, {0, 0, 0}, Quat::IDENTITY, 1.f, entity_map);
+			bool res = m_game.m_engine.instantiatePrefab(m_universe, *m_blueprints[bp].prefab, {0, 0, 0}, Quat::IDENTITY, Vec3(1.f), entity_map);
 			ASSERT(res);
 			const EntityRef e = (EntityRef)entity_map.m_map[0];
 			ext->entity = e;
@@ -868,6 +1073,7 @@ It produces 20 000 kcal/day of food.)#");
 						m_universe.setRotation(m_camera, rot);
 					}
 					break;
+				default: break;
 			}
 		}
 
@@ -941,13 +1147,12 @@ It produces 20 000 kcal/day of food.)#");
 		setText(m_hud, "heat", "%d kJ/s", u32(m_station.stats.production.heat + m_station.stats.consumption.heat));
 	}
 
-	void update(float time_delta, bool paused) override {
+	void update(float time_delta) override {
 		// TODO
 		// game speed
 		// searching for resource & crew
 		// crew
 		// research
-		if (paused) return;
 		if (!m_is_game_started) return;
 
 		m_angle = fmodf(m_angle + m_time_multiplier * time_delta * 0.2f, PI * 2);
@@ -1054,11 +1259,16 @@ It produces 20 000 kcal/day of food.)#");
 		}
 	}
 
+	struct ButtonCallback {
+		virtual ~ButtonCallback() {}
+		virtual void invoke() = 0;
+	};
+
 	bool m_is_game_started = false;
 	u32 m_time_multiplier = 0;
 	IAllocator& m_allocator;
 	Game& m_game;
-	Universe& m_universe;
+	World& m_universe;
 	SpaceStation m_station;
 	EntityRef m_camera;
 	EntityRef m_hud;
@@ -1072,12 +1282,13 @@ It produces 20 000 kcal/day of food.)#");
 	Module* m_selected_module = nullptr;
 	u32 m_id_generator = 0;
 	Array<Blueprint> m_blueprints;
+	HashMap<EntityRef, UniquePtr<ButtonCallback>> m_button_callbacks;
 };
 
-void Game::createScenes(Universe& universe) {
+void Game::createScenes(World& world) {
 	IAllocator& allocator = m_engine.getAllocator();
-	UniquePtr<GameScene> scene = UniquePtr<GameScene>::create(allocator, *this, universe);
-	universe.addScene(scene.move());
+	UniquePtr<GameScene> scene = UniquePtr<GameScene>::create(allocator, *this, world);
+	world.addScene(scene.move());
 }
 
 LUMIX_PLUGIN_ENTRY(game_plugin) {
