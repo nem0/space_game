@@ -18,7 +18,7 @@ function start()
     local center = { 0, -700, -700 }
 
     for i = 1, 1000 do
-        local e = this.universe:createEntity()
+        local e = this.world:createEntity()
         local x = math.random() * 2 - 1
         local y = math.random() * 2 - 1
         e.position = add(add(center, mul(x, {2000, 0, 0})), mul(y, {0, -700, 700}))

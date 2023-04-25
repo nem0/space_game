@@ -19,7 +19,7 @@ function onInputEvent(event)
             drag_type = ""
         end
     elseif event.type == LumixAPI.INPUT_EVENT_AXIS then
-        local gui_scene = this.universe:getScene("gui")
+        local gui_scene = this.world:getScene("gui")
         local e = gui_scene:getRectAt({event.x_abs, event.y_abs})
         
         if drag_type == "" then return end
@@ -53,7 +53,7 @@ function onRectMouseDown(x, y)
     drag_start_value.top = r.top_points 
     drag_start_value.left = r.left_points 
     
-    local gui_scene = this.universe:getScene("gui")
+    local gui_scene = this.world:getScene("gui")
     local e = gui_scene:getRectAt({x, y})
     if e == nil then return end
 

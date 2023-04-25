@@ -8,7 +8,7 @@ end
 
 function start()
     for _, p in ipairs(props) do
-        local s = Lumix.Entity:new(this._universe, _ENV[p])
+        local s = Lumix.Entity:new(this._world, _ENV[p])
         _ENV[p .. "_ui"] = s:getComponent("gui_text") 
     end
 end

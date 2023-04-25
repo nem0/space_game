@@ -37,7 +37,7 @@ local selected_module = nil
 local building = false
 
 function ui_rect(v)
-    local e = this.universe:createEntity()
+    local e =this.world:createEntity()
     if v.parent ~= nil then
         e.parent = v.parent 
     end
@@ -53,13 +53,13 @@ function ui_rect(v)
     
     if v.update ~= nil then
         local s = e:createComponent("lua_script")
-        local lua_scene = LumixAPI.getScene(this._universe, "lua_script")
+        local lua_scene = LumixAPI.getScene(this._world, "lua_script")
         LuaScript.addScript(lua_scene, e, 0)
         local evt = e.lua_script[0]
         evt.update = function()
             v.update(e)
         end
-        LuaScript.rescan(this._universe, e, 0)
+        LuaScript.rescan(this._world, e, 0)
     end
 
     for i = #v, 1, -1 do
@@ -94,7 +94,7 @@ function ui_button(v)
 
     if v.on_click ~= nil then
         e:createComponent("lua_script")
-        local lua_scene = LumixAPI.getScene(this._universe, "lua_script")
+        local lua_scene = LumixAPI.getScene(this._world, "lua_script")
         LuaScript.addScript(lua_scene, e, 0)
         local evt = e.lua_script[0]
         evt.onButtonClicked = function()
@@ -292,7 +292,7 @@ It produces 20 000 kcal/day of food.]]  }
 }
 
     for i, v in ipairs(extensions) do
-        local e = LumixAPI.instantiatePrefab(this.universe, {0, 0, 0}, build_ext_prefab)
+        local e = LumixAPI.instantiatePrefab(this.world, {0, 0, 0}, build_ext_prefab)
         e.parent = build_ext_list
         e.gui_rect.top_points = (i - 1) * 105
         e.gui_rect.bottom_points = i * 105 - 5
@@ -434,7 +434,7 @@ function setModule(entity)
         local s = getFreeSpace(m)
         free_space.gui_text.text = tostring(s) .. "/ 60"
         for idx, ext in ipairs(m.extensions) do
-            local e = LumixAPI.instantiatePrefab(this.universe, {0, 0, 0}, ext_prefab)
+            local e = LumixAPI.instantiatePrefab(this.world, {0, 0, 0}, ext_prefab)
             local r = e.gui_rect
             local i = idx - 1
             local l = (i % 2) * 0.5

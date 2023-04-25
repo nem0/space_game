@@ -257,7 +257,7 @@ struct Game : IPlugin {
 struct GameScene : IScene {
 	GameScene(Game& game, World& world) 
 		: m_game(game)
-		, m_universe(world)
+		, m_world(world)
 		, m_station(game.m_engine.getAllocator())
 		, m_allocator(game.m_engine.getAllocator())
 		, m_blueprints(game.m_engine.getAllocator())
@@ -376,7 +376,7 @@ It produces 20 000 kcal/day of food.)#");
 		if (event_hash == build_module_2_event) {
 			ASSERT(!m_build_preview.isValid());
 			EntityMap entity_map(m_allocator);
-			const bool created = m_game.m_engine.instantiatePrefab(m_universe, *m_game.m_assets.module_2, {0, 0, 0}, Quat::IDENTITY, Vec3(1.f), entity_map);
+			const bool created = m_game.m_engine.instantiatePrefab(m_world, *m_game.m_assets.module_2, {0, 0, 0}, Quat::IDENTITY, Vec3(1.f), entity_map);
 			m_build_preview = entity_map.m_map[0];
 			m_build_prefab = m_game.m_assets.module_2;
 			return;
@@ -384,7 +384,7 @@ It produces 20 000 kcal/day of food.)#");
 		if (event_hash == build_module_3_event) {
 			ASSERT(!m_build_preview.isValid());
 			EntityMap entity_map(m_allocator);
-			const bool created = m_game.m_engine.instantiatePrefab(m_universe, *m_game.m_assets.module_3, {0, 0, 0}, Quat::IDENTITY, Vec3(1.f), entity_map);
+			const bool created = m_game.m_engine.instantiatePrefab(m_world, *m_game.m_assets.module_3, {0, 0, 0}, Quat::IDENTITY, Vec3(1.f), entity_map);
 			m_build_preview = entity_map.m_map[0];
 			m_build_prefab = m_game.m_assets.module_3;
 			return;
@@ -392,7 +392,7 @@ It produces 20 000 kcal/day of food.)#");
 		if (event_hash == build_module_4_event) {
 			ASSERT(!m_build_preview.isValid());
 			EntityMap entity_map(m_allocator);
-			const bool created = m_game.m_engine.instantiatePrefab(m_universe, *m_game.m_assets.module_4, {0, 0, 0}, Quat::IDENTITY, Vec3(1.f), entity_map);
+			const bool created = m_game.m_engine.instantiatePrefab(m_world, *m_game.m_assets.module_4, {0, 0, 0}, Quat::IDENTITY, Vec3(1.f), entity_map);
 			m_build_preview = entity_map.m_map[0];
 			m_build_prefab = m_game.m_assets.module_4;
 			return;
@@ -401,7 +401,7 @@ It produces 20 000 kcal/day of food.)#");
 			ASSERT(false);
 			/*ASSERT(!m_build_preview.isValid());
 			EntityMap entity_map(m_allocator);
-			const bool created = m_game.m_engine.instantiatePrefab(m_universe, *m_game.m_assets.solar_panel, {0, 0, 0}, Quat::IDENTITY, 1.f, Ref(entity_map));
+			const bool created = m_game.m_engine.instantiatePrefab(m_world, *m_game.m_assets.solar_panel, {0, 0, 0}, Quat::IDENTITY, 1.f, Ref(entity_map));
 			m_build_preview = entity_map.m_map[0];
 			m_build_prefab = m_game.m_assets.solar_panel;
 			m_build_ext_type = Extension::Type::SOLAR_PANEL;*/
@@ -566,7 +566,7 @@ It produces 20 000 kcal/day of food.)#");
 			ASSERT(!m_build_preview.isValid());
 			EntityMap entity_map(m_allocator);
 			m_build_ext_type = Extension::Type::HATCH;
-			const bool created = m_game.m_engine.instantiatePrefab(m_universe, *m_game.m_assets.module_2, { 0, 0, 0 }, Quat::IDENTITY, Vec3(1.f), entity_map);
+			const bool created = m_game.m_engine.instantiatePrefab(m_world, *m_game.m_assets.module_2, { 0, 0, 0 }, Quat::IDENTITY, Vec3(1.f), entity_map);
 			m_build_preview = entity_map.m_map[0];
 			m_build_prefab = m_game.m_assets.module_2;
 			return;
@@ -574,7 +574,7 @@ It produces 20 000 kcal/day of food.)#");
 		else if (equalStrings(value, "build_module3")) {
 			ASSERT(!m_build_preview.isValid());
 			EntityMap entity_map(m_allocator);
-			const bool created = m_game.m_engine.instantiatePrefab(m_universe, *m_game.m_assets.module_3, { 0, 0, 0 }, Quat::IDENTITY, Vec3(1.f), entity_map);
+			const bool created = m_game.m_engine.instantiatePrefab(m_world, *m_game.m_assets.module_3, { 0, 0, 0 }, Quat::IDENTITY, Vec3(1.f), entity_map);
 			m_build_preview = entity_map.m_map[0];
 			m_build_prefab = m_game.m_assets.module_3;
 			return;
@@ -582,7 +582,7 @@ It produces 20 000 kcal/day of food.)#");
 		else if (equalStrings(value, "build_module4")) {
 			ASSERT(!m_build_preview.isValid());
 			EntityMap entity_map(m_allocator);
-			const bool created = m_game.m_engine.instantiatePrefab(m_universe, *m_game.m_assets.module_4, { 0, 0, 0 }, Quat::IDENTITY, Vec3(1.f), entity_map);
+			const bool created = m_game.m_engine.instantiatePrefab(m_world, *m_game.m_assets.module_4, { 0, 0, 0 }, Quat::IDENTITY, Vec3(1.f), entity_map);
 			m_build_preview = entity_map.m_map[0];
 			m_build_prefab = m_game.m_assets.module_4;
 			return;
@@ -622,25 +622,25 @@ It produces 20 000 kcal/day of food.)#");
 	}
 
 	IPlugin& getPlugin() const override { return m_game; }
-	struct World& getWorld() override { return m_universe; }
+	struct World& getWorld() override { return m_world; }
 
 	void serialize(OutputMemoryStream& serializer) override {}
 	void deserialize(InputMemoryStream& serialize, const EntityMap& entity_map, i32 version) override {}
 	void clear() override {}
 	
 	EntityRef findByName(EntityRef parent, const char* first, const char* second) {
-		const EntityRef tmp = (EntityRef)m_universe.findByName(parent, first);
-		return (EntityRef)m_universe.findByName(tmp, second);
+		const EntityRef tmp = (EntityRef)m_world.findByName(parent, first);
+		return (EntityRef)m_world.findByName(tmp, second);
 	}
 
 	void initGUI() {
-		GUIScene* scene = (GUIScene*)m_universe.getScene(GUI_BUTTON_TYPE);
+		GUIScene* scene = (GUIScene*)m_world.getScene(GUI_BUTTON_TYPE);
 		scene->mousedButtonUnhandled().bind<&GameScene::onMouseButton>(this);
 
 		((GUISystem&)scene->getPlugin()).enableCursor(true);
 		
-		const EntityPtr gui = m_universe.findByName(INVALID_ENTITY, "gui");
-		scene->enableRect(*m_universe.findByName(gui, "moduleui"), false);
+		const EntityPtr gui = m_world.findByName(INVALID_ENTITY, "gui");
+		scene->enableRect(*m_world.findByName(gui, "moduleui"), false);
 
 		scene->buttonClicked().bind<&GameScene::onGUIButtonClicked>(this);
 	}
@@ -669,15 +669,15 @@ It produces 20 000 kcal/day of food.)#");
 	void startGame() override {
 		m_time_multiplier = 1;
 		m_angle = PI * 0.5f;
-		m_ref_point = (EntityRef)m_universe.findByName(INVALID_ENTITY, "ref_point");
-		m_camera = (EntityRef)m_universe.findByName(m_ref_point, "camera");
-		m_hud = (EntityRef)m_universe.findByName(m_universe.findByName(INVALID_ENTITY, "gui"), "hud");
+		m_ref_point = (EntityRef)m_world.findByName(INVALID_ENTITY, "ref_point");
+		m_camera = (EntityRef)m_world.findByName(m_ref_point, "camera");
+		m_hud = (EntityRef)m_world.findByName(m_world.findByName(INVALID_ENTITY, "gui"), "hud");
 		
 		Module* m = addModule(*m_game.m_assets.module_2);
-		m_universe.setRotation(m->entity, Quat::vec3ToVec3(Vec3(0, 1, 0), Vec3(0, 0, 1)));
+		m_world.setRotation(m->entity, Quat::vec3ToVec3(Vec3(0, 1, 0), Vec3(0, 0, 1)));
 		m->build_progress = 1;
 		
-		const EntityPtr pin_e = m_universe.findByName(m->entity, "ext_0");
+		const EntityPtr pin_e = m_world.findByName(m->entity, "ext_0");
 		addExtension(*m, "solar_panel", pin_e)->build_progress = 0;
 		addExtension(*m, "air_recycler", INVALID_ENTITY)->build_progress = 1;
 		addExtension(*m, "toilet", INVALID_ENTITY)->build_progress = 1;
@@ -704,40 +704,40 @@ It produces 20 000 kcal/day of food.)#");
 	void stopGame() override {
 		// TODO clean station
 		m_is_game_started = false;
-		GUIScene* scene = (GUIScene*)m_universe.getScene(GUI_BUTTON_TYPE);
+		GUIScene* scene = (GUIScene*)m_world.getScene(GUI_BUTTON_TYPE);
 		scene->mousedButtonUnhandled().unbind<&GameScene::onMouseButton>(this);
 		scene->buttonClicked().unbind<&GameScene::onGUIButtonClicked>(this);
 	}
 
 	void destroyChildren(EntityRef e) {
-		EntityPtr ch = m_universe.getFirstChild(e);
+		EntityPtr ch = m_world.getFirstChild(e);
 		while (ch.isValid()) {
 			const EntityRef child = (EntityRef)ch;
-			const EntityPtr next = m_universe.getNextSibling(child);
+			const EntityPtr next = m_world.getNextSibling(child);
 			destroyChildren(child);
-			m_universe.destroyEntity(child);
+			m_world.destroyEntity(child);
 			ch = next;
 		}
 	}
 
 	EntityPtr getEntity(const char* parent, const char* child) const {
-		const EntityPtr e = m_universe.findByName(INVALID_ENTITY, parent);
+		const EntityPtr e = m_world.findByName(INVALID_ENTITY, parent);
 		if (!e.isValid()) return INVALID_ENTITY;
 
-		return m_universe.findByName(*e, child);
+		return m_world.findByName(*e, child);
 	}
 
 	EntityRef findByName(EntityRef parent, const char* child) const {
-		return *m_universe.findByName(parent, child);
+		return *m_world.findByName(parent, child);
 	}
 
 	EntityRef duplicate(EntityRef src) {
 		HashMap<EntityPtr, EntityPtr> map(m_allocator);
-		return duplicate(src, m_universe.getParent(src), map);
+		return duplicate(src, m_world.getParent(src), map);
 	}
 
 	void cloneComponent(const ComponentUID& cmp, EntityRef dst, HashMap<EntityPtr, EntityPtr>& map) {
-		m_universe.createComponent(cmp.type, dst);
+		m_world.createComponent(cmp.type, dst);
 
 		const reflection::ComponentBase* cmp_tpl = reflection::getComponent(cmp.type);
 	
@@ -752,16 +752,16 @@ It produces 20 000 kcal/day of food.)#");
 	}
 
 	EntityRef duplicate(EntityRef src, EntityPtr parent, HashMap<EntityPtr, EntityPtr>& map) {
-		const EntityRef e = m_universe.createEntity({}, {});
-		const char* name = m_universe.getEntityName(src);
-		if (name[0]) m_universe.setEntityName(e, name);
+		const EntityRef e = m_world.createEntity({}, {});
+		const char* name = m_world.getEntityName(src);
+		if (name[0]) m_world.setEntityName(e, name);
 
-		m_universe.setParent(parent, e);
-		for (ComponentUID cmp = m_universe.getFirstComponent(src); cmp.isValid(); cmp = m_universe.getNextComponent(cmp)) {
+		m_world.setParent(parent, e);
+		for (ComponentUID cmp = m_world.getFirstComponent(src); cmp.isValid(); cmp = m_world.getNextComponent(cmp)) {
 			cloneComponent(cmp, e, map);
 		}
 
-		for (EntityPtr c = m_universe.getFirstChild(src); c.isValid(); c = m_universe.getNextSibling(*c)) {
+		for (EntityPtr c = m_world.getFirstChild(src); c.isValid(); c = m_world.getNextSibling(*c)) {
 			duplicate(*c, e, map);
 		}
 
@@ -769,16 +769,16 @@ It produces 20 000 kcal/day of food.)#");
 	}
 
 	void destroy(EntityRef e) {
-		while (EntityPtr c = m_universe.getFirstChild(e)) {
+		while (EntityPtr c = m_world.getFirstChild(e)) {
 			destroy(*c);
 		}
-		m_universe.destroyEntity(e);
+		m_world.destroyEntity(e);
 	}
 
 	void gridLayout(EntityRef root) {
 		GUIScene& gui_scene = getGUIScene();
 		u32 i = 0;
-		for (EntityRef c : m_universe.childrenOf(root)) {
+		for (EntityRef c : m_world.childrenOf(root)) {
 			if (!gui_scene.isRectEnabled(c)) continue;
 
 			gui_scene.setRectTopRelative(c, 0);
@@ -803,7 +803,7 @@ It produces 20 000 kcal/day of food.)#");
 
 		if (m.build_progress < 1) {
 			const EntityRef templ = findByName(module_ui, "crew", "template");
-			while (EntityPtr s = m_universe.getNextSibling(templ)) {
+			while (EntityPtr s = m_world.getNextSibling(templ)) {
 				destroy(*s);
 			}
 
@@ -819,7 +819,7 @@ It produces 20 000 kcal/day of food.)#");
 			}
 
 			gui_scene.enableRect(templ, false);
-			gridLayout(*m_universe.getParent(templ));
+			gridLayout(*m_world.getParent(templ));
 		}
 	}
 
@@ -840,9 +840,9 @@ It produces 20 000 kcal/day of food.)#");
 	}
 	
 	Transform getNeighbourTransform(EntityRef hatch_a, EntityRef hatch_b, EntityRef module_b) const {
-		 Transform hatch_a_tr = m_universe.getTransform(hatch_a);
-		const Transform hatch_b_tr = m_universe.getTransform(hatch_b);
-		const Transform module_b_tr = m_universe.getTransform(module_b);
+		 Transform hatch_a_tr = m_world.getTransform(hatch_a);
+		const Transform hatch_b_tr = m_world.getTransform(hatch_b);
+		const Transform module_b_tr = m_world.getTransform(module_b);
 
 		hatch_a_tr.rot = hatch_a_tr.rot * Quat(Vec3(0, 1, 0), PI);
 
@@ -853,9 +853,9 @@ It produces 20 000 kcal/day of food.)#");
 	}
 
 	Transform getPinnedTransform(EntityRef hatch_a, EntityRef hatch_b, EntityRef module_b) const {
-		 Transform hatch_a_tr = m_universe.getTransform(hatch_a);
-		const Transform hatch_b_tr = m_universe.getTransform(hatch_b);
-		const Transform module_b_tr = m_universe.getTransform(module_b);
+		 Transform hatch_a_tr = m_world.getTransform(hatch_a);
+		const Transform hatch_b_tr = m_world.getTransform(hatch_b);
+		const Transform module_b_tr = m_world.getTransform(module_b);
 
 		const Transform rel = hatch_b_tr.inverted() * module_b_tr;
 		Transform res = hatch_a_tr * rel;
@@ -869,7 +869,7 @@ It produces 20 000 kcal/day of food.)#");
 		DVec3 origin;
 		Vec3 dir;
 		vp.getRay(Vec2((float)x, (float)y), origin, dir);
-		const Transform ref_tr = m_universe.getTransform(m_ref_point);
+		const Transform ref_tr = m_world.getTransform(m_ref_point);
 		const Vec3 N = ref_tr.rot.rotate(Vec3(0, 0, 1));
 
 		if (m_build_preview.isValid()) {
@@ -881,21 +881,21 @@ It produces 20 000 kcal/day of food.)#");
 					if (pin.module) {
 						//Extension* ext = addExtension(*pin.module, m_build_ext_type, pin.pin);
 						//const Transform tr = getPinnedTransform((EntityRef)pin.pin, (EntityRef)m_build_preview, (EntityRef)ext->entity);
-						//m_universe.setTransform((EntityRef)ext->entity, tr);
+						//m_world.setTransform((EntityRef)ext->entity, tr);
 					}
 				}
 				else {
 					const Pin pin = getClosestPin(p, 5, "hatch_");
 					if (pin.module) {
 						Module* m = addModule(*m_build_prefab);
-						const EntityRef hatch_b = (EntityRef)m_universe.findByName(m->entity, "hatch_0");
+						const EntityRef hatch_b = (EntityRef)m_world.findByName(m->entity, "hatch_0");
 						const Transform tr = getNeighbourTransform((EntityRef)pin.pin, hatch_b, m->entity);
-						m_universe.setTransform(m->entity, tr);
+						m_world.setTransform(m->entity, tr);
 					}
 				}
 			}
 			destroyChildren((EntityRef)m_build_preview);
-			m_universe.destroyEntity((EntityRef)m_build_preview);
+			m_world.destroyEntity((EntityRef)m_build_preview);
 			m_build_preview = INVALID_ENTITY;
 		}
 
@@ -906,25 +906,25 @@ It produces 20 000 kcal/day of food.)#");
 	}
 	
 	GUIScene& getGUIScene() {
-		return *(GUIScene*)m_universe.getScene(GUI_BUTTON_TYPE);
+		return *(GUIScene*)m_world.getScene(GUI_BUTTON_TYPE);
 	}
 
 	RenderScene& getRenderScene() {
-		return *(RenderScene*)m_universe.getScene(MODEL_INSTANCE_TYPE);
+		return *(RenderScene*)m_world.getScene(MODEL_INSTANCE_TYPE);
 	}
 
 	LuaScriptScene& getLuaScene() {
-		return *(LuaScriptScene*)m_universe.getScene(LUA_SCRIPT_TYPE);
+		return *(LuaScriptScene*)m_world.getScene(LUA_SCRIPT_TYPE);
 	}
 
 	Module* addModule(PrefabResource& prefab) {
 		Module* m = LUMIX_NEW(m_allocator, Module)(m_allocator);
 		m->id = ++m_id_generator;
 		EntityMap entity_map(m_allocator);
-		const bool created = m_game.m_engine.instantiatePrefab(m_universe, prefab, {0, 0, 0}, Quat::IDENTITY, Vec3(1.f), entity_map);
+		const bool created = m_game.m_engine.instantiatePrefab(m_world, prefab, {0, 0, 0}, Quat::IDENTITY, Vec3(1.f), entity_map);
 		m->entity = (EntityRef)entity_map.m_map[0];
-		m_universe.setParent(m_ref_point, m->entity);
-		m_universe.setLocalPosition(m->entity, {0, 0, 0});
+		m_world.setParent(m_ref_point, m->entity);
+		m_world.setLocalPosition(m->entity, {0, 0, 0});
 		m_station.modules.push(m);
 		return m;
 	}
@@ -938,12 +938,12 @@ It produces 20 000 kcal/day of food.)#");
 
 		if (m_blueprints[bp].prefab) {
 			EntityMap entity_map(m_allocator);
-			bool res = m_game.m_engine.instantiatePrefab(m_universe, *m_blueprints[bp].prefab, {0, 0, 0}, Quat::IDENTITY, Vec3(1.f), entity_map);
+			bool res = m_game.m_engine.instantiatePrefab(m_world, *m_blueprints[bp].prefab, {0, 0, 0}, Quat::IDENTITY, Vec3(1.f), entity_map);
 			ASSERT(res);
 			const EntityRef e = (EntityRef)entity_map.m_map[0];
 			ext->entity = e;
-			m_universe.setParent(pin_e, e);
-			m_universe.setLocalTransform(e, Transform::IDENTITY);
+			m_world.setParent(pin_e, e);
+			m_world.setLocalTransform(e, Transform::IDENTITY);
 		}
 
 		ext->blueprint = bp;
@@ -1035,7 +1035,7 @@ It produces 20 000 kcal/day of food.)#");
 		static bool is_q = false;
 		static bool is_e = false;
 
-		Quat rot = m_universe.getRotation(m_camera);
+		Quat rot = m_world.getRotation(m_camera);
 		const Vec3 up = rot.rotate(Vec3(0, 1, 0));
 		const Vec3 side = rot.rotate(Vec3(1, 0, 0));
 
@@ -1070,7 +1070,7 @@ It produces 20 000 kcal/day of food.)#");
 						const Quat drot = Quat(up, -e.data.axis.x * 0.006f);
 						const Quat drotx = Quat(side, -e.data.axis.y * 0.006f);
 						rot = normalize(drotx * drot * rot);
-						m_universe.setRotation(m_camera, rot);
+						m_world.setRotation(m_camera, rot);
 					}
 					break;
 				default: break;
@@ -1084,13 +1084,13 @@ It produces 20 000 kcal/day of food.)#");
 		if (is_right) move += Vec3(1, 0, 0);
 		if (squaredLength(move) > 0.1f) {
 			move = rot.rotate(move);
-			DVec3 p = m_universe.getPosition(m_camera);
+			DVec3 p = m_world.getPosition(m_camera);
 			p += move * time_delta * (is_fast ? 100.f : 30.f);
-			m_universe.setPosition(m_camera, p);
+			m_world.setPosition(m_camera, p);
 		}
 		if (is_q || is_e) {
 			const Quat drot = Quat(cross(up, side), is_e ? time_delta : -time_delta);
-			m_universe.setRotation(m_camera, normalize(drot * rot));
+			m_world.setRotation(m_camera, normalize(drot * rot));
 		}
 	}
 	
@@ -1108,7 +1108,7 @@ It produces 20 000 kcal/day of food.)#");
 			m->serialize(blob);
 		}
 		
-		GUIScene* gui_scene = (GUIScene*)m_universe.getScene(GUI_BUTTON_TYPE);
+		GUIScene* gui_scene = (GUIScene*)m_world.getScene(GUI_BUTTON_TYPE);
 		gui_scene->mousedButtonUnhandled().unbind<&GameScene::onMouseButton>(this);
 	}
 	
@@ -1134,7 +1134,7 @@ It produces 20 000 kcal/day of food.)#");
 	void setText(EntityRef parent, const char* child, const char* format, u32 value) {
 		char buf[64];
 		sprintf_s(buf, format, value);
-		const EntityPtr e = m_universe.findByName(parent, child);
+		const EntityPtr e = m_world.findByName(parent, child);
 		ASSERT(e.isValid());
 		getGUIScene().setText(*e, buf);
 	}
@@ -1158,8 +1158,8 @@ It produces 20 000 kcal/day of food.)#");
 		m_angle = fmodf(m_angle + m_time_multiplier * time_delta * 0.2f, PI * 2);
 		const float R = 6378e3 + 400e3;
 		const DVec3 ref_point_pos = {cosf(m_angle) * R, 0, sinf(m_angle) * R};
-		m_universe.setPosition(m_ref_point, ref_point_pos);
-		m_universe.setRotation(m_ref_point, Quat({0, 1, 0}, -m_angle + PI * 0.5f));
+		m_world.setPosition(m_ref_point, ref_point_pos);
+		m_world.setRotation(m_ref_point, Quat({0, 1, 0}, -m_angle + PI * 0.5f));
 
 		updateCamera(time_delta);
 		updateHUD();
@@ -1205,11 +1205,11 @@ It produces 20 000 kcal/day of food.)#");
 		float pin_dist = FLT_MAX;
 		for (Module* m : m_station.modules) {
 			if (m->build_progress < 1) continue;
-			for (EntityPtr ch = m_universe.getFirstChild(m->entity); ch.isValid(); ch = m_universe.getNextSibling((EntityRef)ch)) {
+			for (EntityPtr ch = m_world.getFirstChild(m->entity); ch.isValid(); ch = m_world.getNextSibling((EntityRef)ch)) {
 				EntityRef child = (EntityRef)ch;
-				const char* name = m_universe.getEntityName(child);
+				const char* name = m_world.getEntityName(child);
 				if (startsWith(name, prefix)) {
-					const double d = squaredLength(p - m_universe.getPosition(child));
+					const double d = squaredLength(p - m_world.getPosition(child));
 					if (d < pin_dist) {
 						pin_dist = (float)d;
 						closest_pin = child;
@@ -1233,7 +1233,7 @@ It produces 20 000 kcal/day of food.)#");
 		DVec3 origin;
 		Vec3 dir;
 		vp.getRay(Vec2((float)mp.x, (float)mp.y), origin, dir);
-		const Transform ref_tr = m_universe.getTransform(m_ref_point);
+		const Transform ref_tr = m_world.getTransform(m_ref_point);
 		const Vec3 N = ref_tr.rot.rotate(Vec3(0, 0, 1));
 
 		float t;
@@ -1245,17 +1245,17 @@ It produces 20 000 kcal/day of food.)#");
 			if (pin.module) {
 				if (is_ext) {
 					const Transform tr = getPinnedTransform((EntityRef)pin.pin, (EntityRef)m_build_preview, (EntityRef)m_build_preview);
-					m_universe.setTransform((EntityRef)m_build_preview, tr);
+					m_world.setTransform((EntityRef)m_build_preview, tr);
 					return;
 				}
 				
-				const EntityRef hatch_b = (EntityRef)m_universe.findByName((EntityRef)m_build_preview, "hatch_0");				
+				const EntityRef hatch_b = (EntityRef)m_world.findByName((EntityRef)m_build_preview, "hatch_0");				
 				const Transform tr = getNeighbourTransform((EntityRef)pin.pin, hatch_b, (EntityRef)m_build_preview);
-				m_universe.setTransform((EntityRef)m_build_preview, tr);
+				m_world.setTransform((EntityRef)m_build_preview, tr);
 				return;
 			}
 
-			m_universe.setPosition((EntityRef)m_build_preview, p);
+			m_world.setPosition((EntityRef)m_build_preview, p);
 		}
 	}
 
@@ -1268,7 +1268,7 @@ It produces 20 000 kcal/day of food.)#");
 	u32 m_time_multiplier = 0;
 	IAllocator& m_allocator;
 	Game& m_game;
-	World& m_universe;
+	World& m_world;
 	SpaceStation m_station;
 	EntityRef m_camera;
 	EntityRef m_hud;
