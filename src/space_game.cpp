@@ -8,11 +8,11 @@
 #include "engine/reflection.h"
 #include "engine/resource_manager.h"
 #include "engine/world.h"
-#include "gui/gui_scene.h"
+#include "gui/gui_module.h"
 #include "gui/gui_system.h"
 #include "lua_script/lua_script_system.h"
 #include "renderer/model.h"
-#include "renderer/render_scene.h"
+#include "renderer/render_module.h"
 #include <cstdio>
 
 using namespace Lumix;
@@ -223,7 +223,7 @@ struct Assets {
 	PrefabResource* solar_panel = nullptr;
 };
 
-struct Game : IPlugin {
+struct Game : ISystem {
 	Game(Engine& engine)
 		: m_engine(engine)
 	{
@@ -241,11 +241,10 @@ struct Game : IPlugin {
 		m_assets.solar_panel->decRefCount();
 	}
 
-	u32 getVersion() const override { return 0; }
 	void serialize(OutputMemoryStream& stream) const override {}
-	bool deserialize(u32 version, InputMemoryStream& stream) override { return version == 0; }
+	bool deserialize(i32 version, InputMemoryStream& stream) override { return version == 0; }
 
-	void createScenes(World& world) override;
+	void createModules(World& world) override;
 
 	const char* getName() const override { return "game"; }
 
@@ -254,8 +253,8 @@ struct Game : IPlugin {
 };
 
 
-struct GameScene : IScene {
-	GameScene(Game& game, World& world) 
+struct GameModule : IModule {
+	GameModule(Game& game, World& world) 
 		: m_game(game)
 		, m_world(world)
 		, m_station(game.m_engine.getAllocator())
@@ -267,7 +266,7 @@ struct GameScene : IScene {
 		#define REGISTER_FUNCTION(F)                                                                                    \
 			do                                                                                                          \
 			{                                                                                                           \
-				auto f = &LuaWrapper::wrapMethodClosure<&GameScene::F>; \
+				auto f = &LuaWrapper::wrapMethodClosure<&GameModule::F>; \
 				LuaWrapper::createSystemClosure(L, "Game", this, #F, f);                                              \
 			} while (false)
 
@@ -337,7 +336,7 @@ It produces 20 000 kcal/day of food.)#");
 
 	static int lua_onGUIEvent(lua_State* L) {
 		const char* event_name = LuaWrapper::checkArg<const char*>(L, 1);
-		GameScene* game = getClosureScene(L);
+		GameModule* game = getClosureScene(L);
 		if (!game) return 0;
 
 		game->onGUIEvent(event_name);
@@ -421,7 +420,7 @@ It produces 20 000 kcal/day of food.)#");
 		return -1;
 	}
 
-	static void push(GameScene* game, lua_State* L, Extension& ext) {
+	static void push(GameModule* game, lua_State* L, Extension& ext) {
 		lua_newtable(L); // [ext]
 		LuaWrapper::setField(L, -1, "id", ext.id);
 		LuaWrapper::setField(L, -1, "entity", ext.entity.index);
@@ -434,7 +433,7 @@ It produces 20 000 kcal/day of food.)#");
 		const u32 obj_id = LuaWrapper::checkArg<u32>(L, 1);
 		const u32 crewmember_id = LuaWrapper::checkArg<u32>(L, 2);
 
-		GameScene* game = getClosureScene(L);
+		GameModule* game = getClosureScene(L);
 		if (!game) return 0;
 
 		for (CrewMember& c : game->m_station.crew) {
@@ -450,18 +449,18 @@ It produces 20 000 kcal/day of food.)#");
 		return 0;
 	}
 
-	static GameScene* getClosureScene(lua_State* L) {
+	static GameModule* getClosureScene(lua_State* L) {
 		const int index = lua_upvalueindex(1);
-		if (!LuaWrapper::isType<GameScene>(L, index)) {
+		if (!LuaWrapper::isType<GameModule>(L, index)) {
 			logError("Invalid Lua closure");
 			ASSERT(false);
 			return nullptr;
 		}
-		return LuaWrapper::checkArg<GameScene*>(L, index);
+		return LuaWrapper::checkArg<GameModule*>(L, index);
 	}
 
 	static int lua_getCrew(lua_State* L) {
-		GameScene* game = getClosureScene(L);
+		GameModule* game = getClosureScene(L);
 		if (!game) return 0;
 
 		LuaWrapper::DebugGuard guard(L, 1);
@@ -485,7 +484,7 @@ It produces 20 000 kcal/day of food.)#");
 
 	static int lua_getModule(lua_State* L) {
 		const EntityRef e = LuaWrapper::checkArg<EntityRef>(L, 1);
-		GameScene* game = getClosureScene(L);
+		GameModule* game = getClosureScene(L);
 		if (!game) {
 			ASSERT(false);
 			return 0;
@@ -518,7 +517,7 @@ It produces 20 000 kcal/day of food.)#");
 	}
 
 	static int lua_getBlueprints(lua_State* L) {
-		GameScene* game = getClosureScene(L);
+		GameModule* game = getClosureScene(L);
 		if (!game) return 0;
 
 		lua_createtable(L, game->m_blueprints.size(), 0); // [bps]
@@ -553,7 +552,7 @@ It produces 20 000 kcal/day of food.)#");
 
 	static int lua_signal(lua_State* L) {
 		const char* signal = LuaWrapper::checkArg<const char*>(L, 1);
-		GameScene* game = getClosureScene(L);
+		GameModule* game = getClosureScene(L);
 		if (!game) return 0;
 		
 		game->signal(signal);
@@ -590,7 +589,7 @@ It produces 20 000 kcal/day of food.)#");
 	}
 
 	static int lua_getStationStats(lua_State* L) {
-		GameScene* game = getClosureScene(L);
+		GameModule* game = getClosureScene(L);
 		if (!game) return 0;
 
 		lua_newtable(L);
@@ -621,12 +620,11 @@ It produces 20 000 kcal/day of food.)#");
 		return 1;
 	}
 
-	IPlugin& getPlugin() const override { return m_game; }
+	ISystem& getSystem() const override { return m_game; }
 	struct World& getWorld() override { return m_world; }
 
 	void serialize(OutputMemoryStream& serializer) override {}
 	void deserialize(InputMemoryStream& serialize, const EntityMap& entity_map, i32 version) override {}
-	void clear() override {}
 	
 	EntityRef findByName(EntityRef parent, const char* first, const char* second) {
 		const EntityRef tmp = (EntityRef)m_world.findByName(parent, first);
@@ -634,15 +632,15 @@ It produces 20 000 kcal/day of food.)#");
 	}
 
 	void initGUI() {
-		GUIScene* scene = (GUIScene*)m_world.getScene(GUI_BUTTON_TYPE);
-		scene->mousedButtonUnhandled().bind<&GameScene::onMouseButton>(this);
+		GUIModule* module = (GUIModule*)m_world.getModule(GUI_BUTTON_TYPE);
+		module->mousedButtonUnhandled().bind<&GameModule::onMouseButton>(this);
 
-		((GUISystem&)scene->getPlugin()).enableCursor(true);
+		((GUISystem&)module->getSystem()).enableCursor(true);
 		
 		const EntityPtr gui = m_world.findByName(INVALID_ENTITY, "gui");
-		scene->enableRect(*m_world.findByName(gui, "moduleui"), false);
+		module->enableRect(*m_world.findByName(gui, "moduleui"), false);
 
-		scene->buttonClicked().bind<&GameScene::onGUIButtonClicked>(this);
+		module->buttonClicked().bind<&GameModule::onGUIButtonClicked>(this);
 	}
 
 	void onGUIButtonClicked(EntityRef entity) {
@@ -704,9 +702,9 @@ It produces 20 000 kcal/day of food.)#");
 	void stopGame() override {
 		// TODO clean station
 		m_is_game_started = false;
-		GUIScene* scene = (GUIScene*)m_world.getScene(GUI_BUTTON_TYPE);
-		scene->mousedButtonUnhandled().unbind<&GameScene::onMouseButton>(this);
-		scene->buttonClicked().unbind<&GameScene::onGUIButtonClicked>(this);
+		GUIModule* scene = (GUIModule*)m_world.getModule(GUI_BUTTON_TYPE);
+		scene->mousedButtonUnhandled().unbind<&GameModule::onMouseButton>(this);
+		scene->buttonClicked().unbind<&GameModule::onGUIButtonClicked>(this);
 	}
 
 	void destroyChildren(EntityRef e) {
@@ -746,7 +744,7 @@ It produces 20 000 kcal/day of food.)#");
 		property_cloner.src = cmp;
 		property_cloner.dst.type = cmp.type;
 		property_cloner.dst.entity = dst;
-		property_cloner.dst.scene = cmp.scene;
+		property_cloner.dst.module = cmp.module;
 		property_cloner.map = &map;
 		cmp_tpl->visit(property_cloner);
 	}
@@ -776,7 +774,7 @@ It produces 20 000 kcal/day of food.)#");
 	}
 
 	void gridLayout(EntityRef root) {
-		GUIScene& gui_scene = getGUIScene();
+		GUIModule& gui_scene = getGUIModule();
 		u32 i = 0;
 		for (EntityRef c : m_world.childrenOf(root)) {
 			if (!gui_scene.isRectEnabled(c)) continue;
@@ -798,7 +796,7 @@ It produces 20 000 kcal/day of food.)#");
 	void selectModule(Module& m) {
 		m_selected_module = &m;
 		const EntityRef module_ui = *getEntity("gui", "moduleui");
-		GUIScene& gui_scene = getGUIScene();
+		GUIModule& gui_scene = getGUIModule();
 		gui_scene.enableRect(module_ui, true);
 
 		if (m.build_progress < 1) {
@@ -865,7 +863,7 @@ It produces 20 000 kcal/day of food.)#");
 
 	void onMouseButton(bool down, int x, int y) {
 		PROFILE_FUNCTION();
-		const Viewport& vp = getRenderScene().getCameraViewport(m_camera);
+		const Viewport& vp = getRenderModule().getCameraViewport(m_camera);
 		DVec3 origin;
 		Vec3 dir;
 		vp.getRay(Vec2((float)x, (float)y), origin, dir);
@@ -899,22 +897,22 @@ It produces 20 000 kcal/day of food.)#");
 			m_build_preview = INVALID_ENTITY;
 		}
 
-		const RayCastModelHit hit = getRenderScene().castRay(origin, dir, INVALID_ENTITY);
+		const RayCastModelHit hit = getRenderModule().castRay(origin, dir, INVALID_ENTITY);
 		if (hit.is_hit) {
 			selectModule((EntityRef)hit.entity);
 		}
 	}
 	
-	GUIScene& getGUIScene() {
-		return *(GUIScene*)m_world.getScene(GUI_BUTTON_TYPE);
+	GUIModule& getGUIModule() {
+		return *(GUIModule*)m_world.getModule(GUI_BUTTON_TYPE);
 	}
 
-	RenderScene& getRenderScene() {
-		return *(RenderScene*)m_world.getScene(MODEL_INSTANCE_TYPE);
+	RenderModule& getRenderModule() {
+		return *(RenderModule*)m_world.getModule(MODEL_INSTANCE_TYPE);
 	}
 
-	LuaScriptScene& getLuaScene() {
-		return *(LuaScriptScene*)m_world.getScene(LUA_SCRIPT_TYPE);
+	LuaScriptModule& getLuaScene() {
+		return *(LuaScriptModule*)m_world.getModule(LUA_SCRIPT_TYPE);
 	}
 
 	Module* addModule(PrefabResource& prefab) {
@@ -1049,7 +1047,7 @@ It produces 20 000 kcal/day of food.)#");
 					if (e.device->type == InputSystem::Device::MOUSE) {
 						if (e.data.button.key_id == 1) {
 							is_rmb_down = e.data.button.down;
-							((GUISystem&)getGUIScene().getPlugin()).enableCursor(!is_rmb_down);
+							((GUISystem&)getGUIModule().getSystem()).enableCursor(!is_rmb_down);
 
 						}
 					}
@@ -1108,8 +1106,8 @@ It produces 20 000 kcal/day of food.)#");
 			m->serialize(blob);
 		}
 		
-		GUIScene* gui_scene = (GUIScene*)m_world.getScene(GUI_BUTTON_TYPE);
-		gui_scene->mousedButtonUnhandled().unbind<&GameScene::onMouseButton>(this);
+		GUIModule* gui_scene = (GUIModule*)m_world.getModule(GUI_BUTTON_TYPE);
+		gui_scene->mousedButtonUnhandled().unbind<&GameModule::onMouseButton>(this);
 	}
 	
 	void afterReload(InputMemoryStream& blob) override {
@@ -1136,7 +1134,7 @@ It produces 20 000 kcal/day of food.)#");
 		sprintf_s(buf, format, value);
 		const EntityPtr e = m_world.findByName(parent, child);
 		ASSERT(e.isValid());
-		getGUIScene().setText(*e, buf);
+		getGUIModule().setText(*e, buf);
 	}
 
 	void updateHUD() {
@@ -1227,9 +1225,9 @@ It produces 20 000 kcal/day of food.)#");
 	void updateBuildPreview() {
 		if (!m_build_preview.isValid()) return;
 
-		const IVec2 mp = getGUIScene().getCursorPosition();
+		const IVec2 mp = getGUIModule().getCursorPosition();
 
-		const Viewport& vp = getRenderScene().getCameraViewport(m_camera);
+		const Viewport& vp = getRenderModule().getCameraViewport(m_camera);
 		DVec3 origin;
 		Vec3 dir;
 		vp.getRay(Vec2((float)mp.x, (float)mp.y), origin, dir);
@@ -1285,10 +1283,10 @@ It produces 20 000 kcal/day of food.)#");
 	HashMap<EntityRef, UniquePtr<ButtonCallback>> m_button_callbacks;
 };
 
-void Game::createScenes(World& world) {
+void Game::createModules(World& world) {
 	IAllocator& allocator = m_engine.getAllocator();
-	UniquePtr<GameScene> scene = UniquePtr<GameScene>::create(allocator, *this, world);
-	world.addScene(scene.move());
+	UniquePtr<GameModule> module = UniquePtr<GameModule>::create(allocator, *this, world);
+	world.addModule(module.move());
 }
 
 LUMIX_PLUGIN_ENTRY(game_plugin) {
