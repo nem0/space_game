@@ -53,7 +53,7 @@ function ui_rect(v)
     
     if v.update ~= nil then
         local s = e:createComponent("lua_script")
-        local lua_scene = LumixAPI.getScene(this._world, "lua_script")
+        local lua_scene = LumixAPI.getModule(this._world, "lua_script")
         LuaScript.addScript(lua_scene, e, 0)
         local evt = e.lua_script[0]
         evt.update = function()
@@ -94,7 +94,7 @@ function ui_button(v)
 
     if v.on_click ~= nil then
         e:createComponent("lua_script")
-        local lua_scene = LumixAPI.getScene(this._world, "lua_script")
+        local lua_scene = LumixAPI.getModule(this._world, "lua_script")
         LuaScript.addScript(lua_scene, e, 0)
         local evt = e.lua_script[0]
         evt.onButtonClicked = function()
