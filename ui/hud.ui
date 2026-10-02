@@ -53,8 +53,8 @@
 // ================= top bar =================
 [box $topbar position=absolute left=0 top=0 width=100% height=3.6em direction=row wrap=false align-items=center bg-color=#010203f2 padding-left=1.2em padding-right=1.2em] {
 	[box width=13em] {
-		[box direction=row wrap=false font-size=22 color=#f0eadb] { [box padding-right=0.55em] { L A S T } [box] { L I G H T } }
-		[box direction=row wrap=false font-size=10 color=#e6ac3c padding-top=0.3em] { [box padding-right=0.7em] { O R B I T A L } [box] { F O U N D R Y } }
+		[box direction=row wrap=false font-size=22 color=#f0eadb] { [box padding-right=0.55em] { S T I L L } [box] { A B O V E } }
+		[box direction=row wrap=false font-size=10 color=#e6ac3c padding-top=0.3em] { [box padding-right=0.7em] { O R B I T A L } [box] { R E F U G E } }
 	}
 	[box direction=row wrap=false grow=1 align-items=center justify-content=space-between] {
 		[box .chip] { [box width=2.1em height=2.1em bg-image="ui/icons2/cut_steel.spr"] {} [box padding-left=0.55em] { [box .cl] { STEEL } [box .cv] { [span $c_steel text=" "] } } }

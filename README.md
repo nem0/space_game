@@ -1,6 +1,8 @@
 # lumix_space_game
 Space station simulation game made in Lumix Engine. Design docs are in `design/` (start with `design/game.md`).
 
+![Screenshot](screenshot.jpg)
+
 Run: open the project in Lumix Studio and enter game mode (`main.evox` is the entry point). Controls are listed in the in-game CONTROLS menu.
 
 ## Layout
