@@ -1,0 +1,253 @@
+// Scene set-up (camera, sun, Earth below) and an orbit camera: right mouse drag = orbit, wheel = zoom, WASD = pan.
+import "core:world"
+import "core:log"
+import "core:entity"
+import "core:vec3"
+import "core:quat" as quat
+import "std:math" as math
+import "core:dvec3"
+import "core:core/keycode"
+import "core:core/mousebutton"
+import "core:renderer/module"
+import "core:renderer/camera"
+import "core:vec2"
+import "core:core/ray"
+import "core:renderer/environment"
+import "core:renderer/point_light"
+import "core:renderer/model_instance"
+import "scripts/defs" as defs
+import "scripts/state" as st
+import "scripts/station_orbit" as flight
+
+var g_camera : ?Entity = null;
+var g_sky : ?Entity = null;
+var yaw : f32 = 0.6;
+var pitch : f32 = 0.5;
+var distance : f32 = 22.0;
+var target : Vec3 = undefined;
+var look : bool = false;
+var fwd : bool = false;
+var back : bool = false;
+var left : bool = false;
+var right : bool = false;
+
+// Light reflected from the planet. The sun has no sky or bounce light, so without this everything the sun does not hit is pitch black.
+// From this orbit the planet fills the whole lower half of the view, so its light arrives from all around below, not from one point: four
+// shadowless point lights stand in for four patches of the surface - one straight below and three around it, 40 degrees under the horizon.
+// Each patch gives cold blue-white earthshine while the sun is on it and the orange glow of the burning surface when it is in the dark,
+// so the station is lit blue over the day side, orange over the night side and two-toned across the terminator.
+// The lights sit inside the planet: point lights have no shadows, so they still reach the station, but every bit of the surface faces away
+// from them and stays unlit (above the surface they would paint a bright patch on the ground under the station).
+comptime BOUNCE_COUNT = 4;
+var g_bounce : [4]Entity = undefined;
+var g_bounce_ready : bool = false;
+const BOUNCE_DISTANCE : f32 = 400.0;     // the slanted ones cross the surface 308 units from the station, the one straight below 188
+const EARTHSHINE : Vec3 = Vec3 { 0.50, 0.68, 1.0 };
+const FIREGLOW : Vec3 = Vec3 { 1.0, 0.40, 0.10 };
+const EARTHSHINE_POWER : f32 = 0.54;     // per patch in full sun
+const FIREGLOW_POWER : f32 = 0.24;       // per patch in the dark
+const FIREGLOW_DAY : f32 = 0.2;          // share of the fire glow that still shows on a sunlit patch
+
+fn clamp01(v : f32) : f32 {
+	if v < 0.0 { return 0.0; }
+	if v > 1.0 { return 1.0; }
+	return v;
+}
+
+fn initBounce(world : World) : void {
+	for i in 0..BOUNCE_COUNT {
+		const e = world.createEntity();
+		e.setName("Planet light");
+		if const l = e.createPointLight() {
+			l.setIntensity(0.0);
+			l.setRange(BOUNCE_DISTANCE * 4.0);
+			l.setAttenuationParam(0.05);      // nearly no falloff across the station
+			l.setCastShadows(false);
+		}
+		g_bounce[i] = e;
+	}
+	g_bounce_ready = true;
+	updateBounce();
+}
+
+fn updateBounce() : void {
+	if not g_bounce_ready { return; }
+	// station-local directions: `up` points away from the planet (constant in the orbiting frame), `sun` circles once per orbit
+	const up = flight.stationUp();
+	const sun = flight.sunDirLocal();
+	const e1 = Vec3 { 1, 0, 0 };              // horizontal basis (the orbit plane is perpendicular to X, so X is always horizontal)
+	const e2 = cross(up, e1);
+	for i in 0..BOUNCE_COUNT {
+		var dir = -up;                        // from the station to the patch
+		var normal = up;                      // surface normal of the patch
+		if i > 0 {
+			const a = (i as f32) * 2.0944 + 0.5;
+			const h = e1 * math.cos(a) + e2 * math.sin(a);
+			dir = normalizeSafe(h * 0.77 - up * 0.64);
+			normal = normalizeSafe(up * 0.8 + h * 0.6);
+		}
+		const lit = clamp01(dot(normal, sun) * 1.6 + 0.15);
+		const glow = FIREGLOW_DAY + (1.0 - FIREGLOW_DAY) * (1.0 - lit);
+		const color = EARTHSHINE * (EARTHSHINE_POWER * lit) + FIREGLOW * (FIREGLOW_POWER * glow);
+		const power = color.x > color.z ? color.x : color.z;
+		const e = g_bounce[i];
+		e.setPosition(flight.toWorld(dir * BOUNCE_DISTANCE));
+		if const l = e.pointLight() {
+			l.setColor(color * (1.0 / power));
+			l.setIntensity(power);
+		}
+	}
+}
+
+fn initScene(world : World) : void {
+	logInfo("[game] initScene: world partitions ");
+	if world.renderer() == null { logInfo("[game] initScene: NO render module in this world"); }
+	var r = world.renderer() else return;
+	target = Vec3 { 0, 0, 0 };
+
+	const cam = world.createEntity();
+	cam.setName("Orbit camera");
+	if const c = cam.createCamera() {
+		c.setFar(60000.0);
+		c.setFov(0.9);
+		r.setActiveCamera(cam);
+		g_camera = cam;
+	}
+
+	// a hard, white sun over a black sky
+	const sun = world.createEntity();
+	sun.setName("Sun");
+	// Lumix's light vector must point above the station, away from Earth.
+	sun.setRotation(flight.sunRotation());
+	if const env = sun.createEnvironment() {
+		env.setDirectIntensity(3.5);
+		env.setIndirectIntensity(0.25);
+		env.setSkyIntensity(0.0);
+		env.setSunlightStrength(1.0);
+		env.setAtmoEnabled(false);
+		env.setFogDensity(0.0);
+		env.setCastShadows(true); // preserve station self-shadowing
+		r.setActiveEnvironment(sun);
+	}
+
+	// Earth uses the ordinary opaque "default" layer and can cast shadows.
+	// Its depth is written before the transparent atmosphere is composited.
+	const earth = world.createEntity();
+	earth.setName("Earth");
+	earth.setPosition(flight.earthPosition());
+	earth.setScale(Vec3 { 3000.0, 3000.0, 3000.0 });
+	// tilt the planet (80 degrees about Z) so its texture poles are near the orbit plane axis: the orbit then runs over the equator and never over the
+	// stretched, pinched polar rows of the equirectangular map
+	earth.setRotation(quat.Quat { 0.0, 0.0, 0.6442, 0.7648 });
+	if const mi = earth.createModelInstance() {
+		mi.setPath("models/earth/earth.fbx");
+		mi.setMaterialOverride(0, "gfx/earth.mat");
+	}
+
+	// Cloud shell: the same sphere 8 units above the ground (CLOUD_ALTITUDE in gfx/earth_noise.hlsli), opaque with holes.
+	// It must have the Earth's rotation: it looks up the cloud coverage in the same map through the same UVs.
+	const clouds = world.createEntity();
+	clouds.setName("Earth clouds");
+	clouds.setPosition(flight.earthPosition());
+	clouds.setScale(Vec3 { 3008.0, 3008.0, 3008.0 });
+	clouds.setRotation(quat.Quat { 0.0, 0.0, 0.6442, 0.7648 });
+	if const mi = clouds.createModelInstance() {
+		mi.setPath("models/earth/earth.fbx");
+		mi.setMaterialOverride(0, "gfx/earth_clouds.mat");
+	}
+
+	// Separate, thin scattering shell, centered on the fixed Earth (not the
+	// station's orbital frame). Forward transparency excludes it from shadows.
+	const atmosphere = world.createEntity();
+	atmosphere.setName("Earth atmosphere");
+	atmosphere.setPosition(flight.earthPosition());
+	atmosphere.setScale(Vec3 { 3030.0, 3030.0, 3030.0 });
+	if const mi = atmosphere.createModelInstance() {
+		mi.setPath("models/earth_atmosphere/earth_atmosphere.fbx");
+		mi.setMaterialOverride(0, "gfx/earth_atmosphere.mat");
+	}
+
+	// Stars and Milky Way (gfx/sky.hlsl) on a sphere that update() keeps centred on the camera. It must stay inside the camera's far plane.
+	const sky = world.createEntity();
+	sky.setName("Sky");
+	sky.setScale(Vec3 { 40000.0, 40000.0, 40000.0 });
+	if const mi = sky.createModelInstance() {
+		mi.setPath("models/earth/earth.fbx");
+		mi.setMaterialOverride(0, "gfx/sky.mat");
+	}
+	g_sky = sky;
+
+	initBounce(world);
+}
+
+// HUD camera presets; ordinary orbit/zoom controls remain unchanged.
+fn setView(index : i32) : void {
+	match index {
+		case 0: yaw = 0.6; pitch = 0.5;
+		case 1: yaw = 0.0; pitch = 1.5;
+		case 2: yaw = 1.57; pitch = 0.0;
+		case: yaw = 0.6; pitch = 0.5; distance = 22.0; target = Vec3 { 0, 0, 0 };
+	}
+}
+
+fn onKey(code : Keycode, down : bool) : void {
+	match code {
+		case .W: fwd = down;
+		case .S: back = down;
+		case .A: left = down;
+		case .D: right = down;
+		case:
+	}
+}
+
+fn onMouseButton(button : MouseButton, down : bool) : void {
+	if button == .RIGHT { look = down; }
+}
+
+fn onMouseMove(dx : f32, dy : f32) : void {
+	if not look { return; }
+	yaw -= dx * 0.006;
+	pitch += dy * 0.006;
+	if pitch > 1.5 { pitch = 1.5; }
+	if pitch < -1.5 { pitch = -1.5; }
+}
+
+fn onWheel(y : f32) : void {
+	distance -= y * 1.2;
+	if distance < 4.0 { distance = 4.0; }
+	if distance > 120.0 { distance = 120.0; }
+}
+
+// ray under the mouse cursor in station-local coordinates (the same space as sockets)
+fn aimRay(mx : f32, my : f32, origin : *Vec3, dir : *Vec3) : bool {
+	const cam = g_camera else return false;
+	const c = cam.camera() else return false;
+	const r = c.getRay(Vec2 { mx, my });
+	const base = flight.toWorld(Vec3 { 0, 0, 0 });
+	const inv = flight.conjugate(flight.frameRotation());
+	origin.* = defs.rotate(inv, Vec3 { (r.origin.x - base.x) as f32, (r.origin.y - base.y) as f32, (r.origin.z - base.z) as f32 });
+	dir.* = normalizeSafe(defs.rotate(inv, r.dir));
+	return true;
+}
+
+fn update(dt : f32) : void {
+	const cam = g_camera else return;
+	const q = quat.makeQuatFromYaw(yaw) * quat.makeQuatFromPitch(pitch);
+	// pan on the horizontal plane relative to the view direction
+	const f = defs.rotate(q, Vec3 { 0, 0, -1 });
+	const rt = defs.rotate(q, Vec3 { 1, 0, 0 });
+	var move = Vec3 { 0, 0, 0 };
+	if fwd { move = move + Vec3 { f.x, 0, f.z }; }
+	if back { move = move - Vec3 { f.x, 0, f.z }; }
+	if right { move = move + Vec3 { rt.x, 0, rt.z }; }
+	if left { move = move - Vec3 { rt.x, 0, rt.z }; }
+	if lengthSquared(move) > 0.001 { target = target + normalizeSafe(move) * (distance * 0.6 * dt); }
+	const pos = target + defs.rotate(q, Vec3 { 0, 0, distance });
+	st.cam_right = rt;
+	st.cam_up = defs.rotate(q, Vec3 { 0, 1, 0 });
+	st.cam_dist = distance;
+	cam.setPosition(flight.toWorld(pos));
+	if const sky = g_sky { sky.setPosition(flight.toWorld(pos)); }
+	cam.setRotation(flight.frameRotation() * q);
+	updateBounce();
+}

@@ -1,0 +1,747 @@
+// Gameplay tuning: every number that decides how the game plays, in one place.
+// Units: time in game minutes (a game day is 1440), materials in kg, oxygen in litres (L), food in kilocalories (kcal), power, heat and cooling
+// in kW, battery charge in kWh, propellant in kg, altitude in km, station mass in tonnes (t), research in research points (RP).
+import "scripts/defs" as defs
+// Geometry (ports, bounding radii), visuals and camera settings stay with their code.
+
+// ---- clock ---------------------------------------------------------------------------------------------------------------------------
+const MINUTES_PER_DAY : f32 = 1440.0;
+// game minutes that pass per real second at each speed setting (HUD buttons / Z X C keys)
+const SPEED_1X : f32 = 4.0;
+const SPEED_3X : f32 = 12.0;
+const SPEED_10X : f32 = 40.0;
+const MAX_FRAME_SECONDS : f32 = 0.1;          // longer frames are clamped, so a hitch never skips hours
+const ORBIT_PERIOD_MINUTES : f32 = 2400.0;    // one revolution around Earth (10 real minutes at 1x): day / night cycle and wing tracking
+
+// ---- start ---------------------------------------------------------------------------------------------------------------------------
+const START_CREW : i32 = 2;
+// The opening (design/objectives.md): a damaged Central Module, a decaying orbit, little food, a finite water tank without recycling, no batteries.
+// The starter stock pays for most of the module repair but not all of it: the last few kg come from dismantling something (the small solar panel).
+const START_STEEL : f32 = 90.0;             // kg
+const START_ELECTRONICS : f32 = 40.0;       // kg
+const START_POLYMERS : f32 = 36.0;          // kg
+const START_PARTS : f32 = 20.0;             // kg
+const START_O2 : f32 = 4000.0;              // L (about 3.4 days for two crew)
+const START_FOOD : f32 = 50000.0;           // kcal
+const START_WATER : f32 = 160.0;            // L
+const START_RP : f32 = 0.0;
+const START_BATTERY : f32 = 0.0;            // kWh
+const START_MIXED : f32 = 0.0;              // kg of unsorted salvage
+const START_FUEL : f32 = 160.0;             // kg of propellant: one emergency burn, not the climb to the reboost target
+const START_ALTITUDE_KM : f32 = 360.0;
+const CENTRAL_START_HP : f32 = 0.5;         // the Central Module starts half broken: its CO2 scrubbing runs at half output
+
+// ---- life support --------------------------------------------------------------------------------------------------------------------
+const O2_PER_CREW : f32 = 0.41;               // L per crew member per game minute: a real person breathes 0.84 kg a day, about 590 L (design/resources.md)
+const FOOD_PER_CREW : f32 = 3000.0;           // kcal per crew member per game day
+const SUFFOCATE_MINUTES : f32 = 5.0;          // with the oxygen at zero, one crew member dies every this many minutes
+const STARVE_MINUTES : f32 = 720.0;           // with the food at zero, one crew member dies every this many minutes
+
+// ---- water -----------------------------------------------------------------------------------------------------------------------------
+// The crew use WATER_PER_CREW litres a game day. Without a water recycler rack all of it is lost; each working recycler gives back
+// WATER_RECOVERY of it (scaled by its HP, at most one recycler counts at full). Ice from salvage refills the tank. At zero a crew member dies
+// every WATER_DEATH_MINUTES.
+const WATER_PER_CREW : f32 = 10.0;            // L per crew member per game day
+const WATER_RECOVERY : f32 = 0.8;
+const WATER_CAP : f32 = 400.0;                // L of tank
+const WATER_DEATH_MINUTES : f32 = 1440.0;
+const ALERT_LOW_WATER : f32 = 40.0;           // L
+// fuel producer rack: electrolysis turns water into propellant while it has water and runs at the station efficiency
+const FUEL_PRODUCER_KG_PER_DAY : f32 = 8.0;
+const FUEL_PRODUCER_WATER_PER_KG : f32 = 1.0; // L of water per kg of propellant
+
+// ---- injuries --------------------------------------------------------------------------------------------------------------------------
+// Crew get hurt at random, more often on missions. A minor injury lowers their output (INJURY_MINOR_FACTOR) and heals slowly by itself; a working
+// medical rack heals it much faster. A serious injury takes them off all work: they die after INJURY_SERIOUS_DOOM_MINUTES unless they are nursed
+// in a medical bay (a working medical rack, once Medical Bay is researched) by another crew member, who then does nothing else.
+const INJURY_PER_CREW_PER_DAY : f32 = 0.04;   // chance of a new injury per crew member per game day
+const INJURY_MISSION_CHANCE : f32 = 0.12;     // on returning from a mission or EVA
+const INJURY_MISSION_FAIL_CHANCE : f32 = 0.35;
+const INJURY_SERIOUS_SHARE : f32 = 0.25;      // of all injuries
+const INJURY_MINOR_FACTOR : f32 = 0.7;        // work multiplier while minorly hurt
+const INJURY_MINOR_MINUTES : f32 = 2880.0;    // time to heal at the natural rate (1x)
+const INJURY_NATURAL_RATE : f32 = 0.25;       // healing speed without a medical rack, against the rack's INJURY_TREATED_RATE
+const INJURY_TREATED_RATE : f32 = 2.0;
+const INJURY_SERIOUS_CARE_MINUTES : f32 = 2880.0;   // nursing time a serious injury needs
+const INJURY_SERIOUS_DOOM_MINUTES : f32 = 5760.0;   // time to live without care
+
+// ---- carbon dioxide ------------------------------------------------------------------------------------------------------------------
+// CO2 is tracked in litres in the cabin air and shown as ppm of the station's pressurised volume (sum of the modules' volume), so new
+// modules dilute it. Scrubbers and plants (module co2_scrub) remove it at the station's power / cooling efficiency, down to the background
+const CO2_PER_CREW : f32 = 0.354;              // L exhaled per crew member per game minute: about 510 L (1 kg) a day
+const CO2_BACKGROUND_PPM : f32 = 400.0;       // start level; scrubbing cannot go below it
+const CO2_WARN_PPM : f32 = 5000.0;            // above this the crew get headaches: every module's output drops ...
+const CO2_BAD_PPM : f32 = 20000.0;            // ... linearly, to CO2_BAD_EFFICIENCY at this level
+const CO2_BAD_EFFICIENCY : f32 = 0.5;
+const CO2_LETHAL_PPM : f32 = 30000.0;         // above this one crew member dies every CO2_DEATH_MINUTES
+const CO2_DEATH_MINUTES : f32 = 10.0;
+
+// ---- power and heat ------------------------------------------------------------------------------------------------------------------
+const HEAT_PER_KW : f32 = 0.8;                // kW of waste heat per kW consumed; more heat than cooling = overheating
+const OVERHEAT_EFFICIENCY : f32 = 0.6;        // output multiplier of every module while overheating
+
+// ---- orbit and propellant ----------------------------------------------------------------------------------------------------------
+// Drag lowers the orbit; the decay rate doubles every ALT_DECAY_DOUBLING_KM lower (denser air). A reboost burn climbs at BOOST_KM_PER_HOUR
+// until BOOST_TARGET_KM or until the fuel runs out, burning fuel in proportion to the station mass (sum of module mass)
+const ALT_DECAY_KM_PER_DAY : f32 = 6.0;       // at ALT_DECAY_REF_KM
+const ALT_DECAY_REF_KM : f32 = 400.0;
+const ALT_DECAY_DOUBLING_KM : f32 = 40.0;
+const ALT_WARN_KM : f32 = 330.0;              // alert below this
+const ALT_REENTRY_KM : f32 = 200.0;           // the station is lost below this
+const ALT_MAX_KM : f32 = 450.0;
+const SAFE_ALT_KM : f32 = 375.0;              // objective "stop the descent": back above this altitude
+const BOOST_TARGET_KM : f32 = 420.0;          // a reboost burn stops here
+const BOOST_KM_PER_HOUR : f32 = 10.0;         // climb rate while burning (game hours)
+const BOOST_FUEL_KG_PER_KM_PER_T : f32 = 0.2; // propellant per km of climb per tonne of station
+
+// ---- module condition (HP) ------------------------------------------------------------------------------------------------------------
+// Every module has HP from 0 to 1 (built at 1). It wears down over time; a module's production (power generated, oxygen, food, research,
+// cooling, CO2 scrubbing) is multiplied by its HP. Power draw, berths and storage capacities are not. Repairs cost steel and polymers in
+// proportion to the missing HP and the module's mass
+const HP_DECAY_PER_DAY : f32 = 0.01;          // lost per game day (2% a day: 50% after 50 days)
+const HP_WARN : f32 = 0.5;                    // alert when any module is below this
+const REPAIR_STEEL_KG_PER_T : f32 = 10.0;     // kg of steel per tonne of module to restore 100% HP
+const REPAIR_POLYMERS_KG_PER_T : f32 = 4.0;   // kg of polymers per tonne of module to restore 100% HP
+
+// ---- objectives ----------------------------------------------------------------------------------------------------------------------
+// The opening chain is in scripts/objectives.evox (design/objectives.md). Only non-research objectives pay RP, in three sizes
+const WIN_CREW : i32 = 8;                     // win: this many crew ...
+const WIN_STABLE_DAYS : f32 = 3.0;            // ... with oxygen, food and power all sustained for this many days in a row
+const OBJECTIVE_RP_S : f32 = 30.0;
+const OBJECTIVE_RP_M : f32 = 60.0;
+const OBJECTIVE_RP_L : f32 = 100.0;
+const OBJECTIVE_REPAIRED_HP : f32 = 0.99;     // "fix the CO2": the Central Module counts as repaired from this HP
+const OBJECTIVE_SLOTS_LEFT : i32 = 0;         // "build another module" appears once this many rack slots or fewer are free
+
+// ---- HUD alerts ----------------------------------------------------------------------------------------------------------------------
+const ALERT_LOW_O2 : f32 = 1000.0;            // L (about a day for two crew)
+const ALERT_LOW_FOOD : f32 = 10000.0;         // kcal
+// CO2 alert: CO2_WARN_PPM
+
+// ---- sorting --------------------------------------------------------------------------------------------------------------------------
+// Mixed salvage is sorted automatically while there is some and at least one crew aboard (until a Sorting Bay module exists, the Central
+// Module does it). It runs at the station efficiency and draws SORT_POWER_KW while running. The output shares must stay below 1: the rest is
+// waste, discarded until waste is a resource. Mixed salvage needs cargo space (module mixed_store); a haul beyond it is left behind
+const SORT_KG_PER_HOUR : f32 = 25.0;           // per workshop bench (600 kg a day)
+const SORT_POWER_KW : f32 = 5.5;               // extra draw of a bench while it sorts (0.5 kW idle is in its rack stats)
+const HAND_SORT_KG_PER_HOUR : f32 = 10.0;      // without any workshop bench the crew hand-sort in the Central Module (240 kg a day, same power draw)
+const SORT_STEEL : f32 = 0.45;
+const SORT_POLYMERS : f32 = 0.20;
+const SORT_ELECTRONICS : f32 = 0.10;
+const SORT_PARTS : f32 = 0.10;
+
+// ---- radar contacts and missions -----------------------------------------------------------------------------------------------------
+// A working Radar attachment picks up contacts (MissionKind): derelicts with survivors, escape pods, dead satellites, asteroids, settlers who
+// want to join. A contact stays open for its kind's open_minutes. Launching one costs fuel and, for most kinds, takes a shuttle docked at a
+// Docking Hub and a pilot (the selected crew member) for the flight time. Every mission can fail (risk): then nothing is gained.
+const CONTACT_FIRST_MINUTES : f32 = 60.0;     // after the radar comes online
+const CONTACT_INTERVAL_MIN : f32 = 360.0;     // between two contacts (antennas shorten it)
+const CONTACT_INTERVAL_MAX : f32 = 900.0;
+comptime CONTACT_MAX = 4;                     // open contacts at once (the HUD has rows for this many): up to 3 from the radar + 1 scrap
+comptime RADAR_CONTACT_MAX = 3;
+// nearby scrap: always in EVA reach, no radar or shuttle needed - the small, steady trickle that gets a new station going
+const SCRAP_FIRST_MINUTES : f32 = 30.0;
+const SCRAP_INTERVAL_MIN : f32 = 240.0;      // after the last one was flown, ignored or lost
+const SCRAP_INTERVAL_MAX : f32 = 480.0;
+comptime MISSION_MAX = 4;                     // missions under way at once (HUD rows)
+
+enum MissionKind {
+	Debris,        // a nearby debris field: mixed salvage and sealed propellant tanks, short and safe (the bread and butter)
+	Derelict,      // crew of a failing station: survivors and their salvage
+	Pod,           // escape pod: one survivor, a short hop
+	Starlink,      // dead satellite swarm: electronics and polymers
+	Asteroid,      // small rock: metal and ice (propellant); needs a mining drill
+	Settlers,      // another station's crew asks to join: they fly over themselves
+	Scrap          // loose wreckage within EVA reach: small haul, no radar or shuttle (never picked by the radar, see SCRAP_*)
+}
+
+comptime MISSION_KINDS = 7;
+
+// rewards are random within [min, max] and fixed when the contact appears; survivors need free berths when the mission is launched
+struct MissionStats {
+	name : []const u8;
+	blurb : []const u8;
+	weight : f32;            // relative chance a new contact is of this kind
+	needs_radar : bool;      // only a working radar finds it
+	needs_ship : bool;       // a shuttle and a pilot fly it
+	needs_crew : bool;       // takes a crew member away for its duration (pilot, or EVA without a shuttle)
+	needs_drill : bool;      // takes one mining drill (workshop), used up
+	open_minutes : f32;      // how long the contact can be answered
+	minutes : f32;           // flight time (or arrival time for settlers)
+	risk : f32;              // chance of failure
+	fuel_min : f32;          // propellant it costs, kg
+	fuel_max : f32;
+	crew_min : i32;          // survivors / settlers
+	crew_max : i32;
+	mixed_min : f32;         // kg of mixed salvage brought back
+	mixed_max : f32;
+	steel_min : f32;
+	steel_max : f32;
+	elec_min : f32;
+	elec_max : f32;
+	poly_min : f32;
+	poly_max : f32;
+	fuel_gain_min : f32;     // kg of propellant brought back (asteroid ice)
+	fuel_gain_max : f32;
+	water_min : f32;         // L of water (ice) brought back
+	water_max : f32;
+}
+
+fn noMission(name : []const u8, blurb : []const u8, weight : f32, needs_ship : bool, open_minutes : f32, minutes : f32, risk : f32, fuel_min : f32, fuel_max : f32) : MissionStats {
+	return {
+		.name = name, .blurb = blurb, .weight = weight, .needs_radar = true, .needs_ship = needs_ship, .needs_crew = needs_ship, .needs_drill = false, .open_minutes = open_minutes, .minutes = minutes, .risk = risk,
+		.fuel_min = fuel_min, .fuel_max = fuel_max, .crew_min = 0, .crew_max = 0, .mixed_min = 0.0, .mixed_max = 0.0, .steel_min = 0.0, .steel_max = 0.0,
+		.elec_min = 0.0, .elec_max = 0.0, .poly_min = 0.0, .poly_max = 0.0, .fuel_gain_min = 0.0, .fuel_gain_max = 0.0, .water_min = 0.0, .water_max = 0.0
+	};
+}
+
+fn missionKind(index : i32) : MissionKind {
+	match index {
+		case 0: return .Debris;
+		case 1: return .Derelict;
+		case 2: return .Pod;
+		case 3: return .Starlink;
+		case 4: return .Asteroid;
+		case 5: return .Settlers;
+		case:
+	}
+	return .Scrap;
+}
+
+fn missionStats(kind : MissionKind) : MissionStats {
+	match kind {
+		case .Debris:
+			var s = noMission("Debris field", "Wreckage drifting close by: hull scrap and sealed propellant tanks.", 2.5, true, 720.0, 90.0, 0.05, 20.0, 30.0);
+			s.mixed_min = 400.0; s.mixed_max = 900.0; s.fuel_gain_min = 30.0; s.fuel_gain_max = 120.0; s.water_min = 30.0; s.water_max = 90.0; return s;
+		case .Derelict:
+			var s = noMission("Derelict station", "A failing station's crew begs for evacuation.", 1.0, true, 1440.0, 360.0, 0.2, 100.0, 160.0);
+			s.crew_min = 2; s.crew_max = 3; s.mixed_min = 200.0; s.mixed_max = 500.0; return s;
+		case .Pod:
+			var s = noMission("Escape pod", "A beacon from a drifting escape pod.", 1.0, true, 720.0, 120.0, 0.1, 40.0, 70.0);
+			s.crew_min = 1; s.crew_max = 1; return s;
+		case .Starlink:
+			var s = noMission("Dead satellites", "A cluster of dead Starlink satellites to strip.", 1.2, true, 2160.0, 240.0, 0.1, 60.0, 110.0);
+			s.elec_min = 40.0; s.elec_max = 90.0; s.poly_min = 20.0; s.poly_max = 50.0; return s;
+		case .Asteroid:
+			var s = noMission("Asteroid", "A small metal-rich rock with ice, close enough to mine.", 1.0, true, 2880.0, 600.0, 0.25, 150.0, 250.0);
+			s.needs_drill = true; s.steel_min = 150.0; s.steel_max = 300.0; s.fuel_gain_min = 120.0; s.fuel_gain_max = 250.0; s.water_min = 100.0; s.water_max = 220.0; return s;
+		case .Settlers:
+			var s = noMission("Settlers", "Another station's crew asks to join and will fly over.", 0.6, false, 1440.0, 480.0, 0.1, 0.0, 0.0);
+			s.crew_min = 2; s.crew_max = 3; s.mixed_min = 100.0; s.mixed_max = 300.0; return s;
+		case .Scrap:
+			// weight 0: the radar never picks it, sim.updateContacts offers one every SCRAP_INTERVAL_*
+			var s = noMission("Nearby scrap", "Loose wreckage within EVA reach of the station.", 0.0, false, 360.0, 120.0, 0.05, 0.0, 0.0);
+			s.needs_radar = false; s.needs_crew = true; s.mixed_min = 100.0; s.mixed_max = 250.0; s.fuel_gain_min = 2.0; s.fuel_gain_max = 8.0; s.water_min = 8.0; s.water_max = 25.0; return s;
+	}
+	return noMission("", "", 0.0, false, 0.0, 0.0, 0.0, 0.0, 0.0);
+}
+
+// ---- shuttles ------------------------------------------------------------------------------------------------------------------------
+// Each Docking Hub berths one shuttle, built there by a crew member (module panel) like a module (WORK_MIN_PER_KG of its materials)
+const SHIP_STEEL : i32 = 120;
+const SHIP_ELECTRONICS : i32 = 60;
+const SHIP_POLYMERS : i32 = 40;
+const SHIP_PARTS : i32 = 60;
+const SHIP_MASS : f32 = 6.0;                  // t, counts towards the station mass while docked
+
+// ---- building ------------------------------------------------------------------------------------------------------------------------
+const BUILD_OVERLAP : f32 = 0.75;             // two modules collide when their centres are closer than this share of their radii summed
+
+// ---- module catalogue (hulls and special modules; what a hull does comes from its racks, see below) ----------------------------------------------------------------------------------------------------------------
+// (config and scripts/defs import each other: the catalogue is keyed by defs.ModuleKind, defs reads its stats from here)
+// costs: kg; power: kW, positive produces; crew: berths; o2: L per game minute; food: kcal per game day; research: RP per game hour;
+// battery: kWh; cooling: kW; o2_store: L; food_store: kcal; co2_scrub: L of CO2 removed per game minute (scrubbers, plants);
+// volume: pressurised m3; fuel_store: kg of propellant tanks; mixed_store: kg of cargo hold for unsorted salvage; mass: t (reboost fuel scales with it); unlock: id of the technology (TECH_* below, 1..TECH_COUNT) that must be researched before it can be built, 0 = available from the start.
+struct ModuleStats {
+	name : []const u8;
+	steel : i32;
+	electronics : i32;
+	polymers : i32;
+	parts : i32;
+	power : f32;
+	crew : i32;
+	o2 : f32;
+	food : f32;
+	research : f32;
+	battery : f32;
+	cooling : f32;
+	o2_store : f32;
+	food_store : f32;
+	co2_scrub : f32;
+	volume : f32;
+	fuel_store : f32;
+	mixed_store : f32;
+	mass : f32;
+	unlock : i32;
+}
+
+fn none(name : []const u8) : ModuleStats {
+	return {
+		.name = name, .steel = 0, .electronics = 0, .polymers = 0, .parts = 0, .power = 0.0, .crew = 0, .o2 = 0.0, .food = 0.0,
+		.research = 0.0, .battery = 0.0, .cooling = 0.0, .o2_store = 0.0, .food_store = 0.0, .co2_scrub = 0.0, .volume = 0.0, .fuel_store = 0.0, .mixed_store = 0.0, .mass = 0.0, .unlock = 0
+	};
+}
+
+fn moduleStats(kind : defs.ModuleKind) : ModuleStats {
+	match kind {
+		case .Central:
+			// a module produces nothing, it only radiates heat (cooling), holds tanks and gives pressurised volume. Life support, berths, storage and
+			// benches are racks (build.startStation fits them); power comes from attachments (the roof's small solar panels and a radioisotope generator)
+			var s = none("Central Module");
+			s.o2_store = 4000.0; s.cooling = 19.0; s.volume = 150.0; s.fuel_store = 1000.0; s.mass = 20.0;
+			return s;
+		case .SmallHull:
+			var s = none("Small Hull");
+			s.steel = 120; s.electronics = 25; s.polymers = 60; s.parts = 40; s.power = -0.2; s.volume = 30.0; s.mass = 2.5;
+			return s;
+		case .Hull:
+			var s = none("Standard Hull");
+			s.steel = 180; s.electronics = 40; s.polymers = 90; s.parts = 55; s.power = -0.3; s.volume = 50.0; s.mass = 3.5; s.unlock = 30;
+			return s;
+		case .LargeHull:
+			var s = none("Large Hull");
+			s.steel = 300; s.electronics = 65; s.polymers = 150; s.parts = 90; s.power = -0.5; s.volume = 90.0; s.mass = 6.0; s.unlock = 18;
+			return s;
+		case .Junction:
+			var s = none("X Junction");
+			s.steel = 60; s.electronics = 30; s.polymers = 20; s.parts = 20; s.power = -0.2; s.volume = 20.0; s.mass = 3.0; s.unlock = 31;
+			return s;
+		case .SolarWing:
+			var s = none("Solar Wing");
+			s.steel = 80; s.electronics = 40; s.polymers = 20; s.parts = 30; s.power = 10.0; s.unlock = 25; s.mass = 1.0;
+			return s;
+		case .RadiatorWing:
+			var s = none("Radiator Wing");
+			s.steel = 80; s.electronics = 30; s.polymers = 40; s.parts = 30; s.cooling = 10.0; s.unlock = 6; s.mass = 1.0;
+			return s;
+		case .GasStorage:
+			var s = none("Gas Storage");
+			s.steel = 80; s.electronics = 30; s.polymers = 60; s.parts = 40; s.power = -0.5; s.o2_store = 10000.0; s.unlock = 16; s.fuel_store = 1500.0; s.mass = 2.0;
+			return s;
+		case .DockingHub:
+			// berths one shuttle at its outer end (missions); the shuttle is built separately (SHIP_*)
+			var s = none("Docking Hub");
+			s.steel = 90; s.electronics = 30; s.polymers = 30; s.parts = 40; s.power = -1.0; s.volume = 25.0; s.fuel_store = 500.0; s.mass = 4.0; s.unlock = 15;
+			return s;
+	}
+	return none("");
+}
+
+// ---- attachments -----------------------------------------------------------------------------------------------------------------------
+// Small add-ons on a module's hull slots (defs.slotCount / defs.slot). Production scales with the attachment's own HP like a module's; they
+// add their mass to the station. Costs in kg; power kW (positive produces); cooling kW; co2_scrub L/min; stores L / kg; bonuses are fractions.
+// Bonus caps: only one antenna and two dishes count. A working radar (any one) is what finds mission contacts.
+enum AttachKind {
+	Solar,
+	Vent,
+	Crate,
+	FuelTank,
+	O2Tank,
+	Scrubber,
+	Light,
+	Antenna,
+	Dish,
+	Radar,
+	Rtg
+}
+
+comptime ATTACH_COUNT = 11;  // functional only: decoration (handrails etc.) is placed at random by modgen.evox, not built
+const ATTACH_REFUND : f32 = 0.5;              // share of the materials returned when an attachment is dismantled
+const ANTENNA_MAX : i32 = 1;
+const DISH_MAX : i32 = 2;
+
+struct AttachStats {
+	name : []const u8;
+	effect : []const u8;     // one-line description for cards and tooltips
+	steel : i32;
+	electronics : i32;
+	polymers : i32;
+	parts : i32;
+	power : f32;
+	cooling : f32;
+	co2_scrub : f32;
+	o2_store : f32;
+	fuel_store : f32;
+	mixed_store : f32;
+	sort_bonus : f32;        // + share of sorting rate (counts on the Central Module, which does the sorting)
+	contact_bonus : f32;     // - share of the time between radar contacts
+	radar : bool;            // detects contacts (missions)
+	always_on : bool;        // power that keeps flowing in Earth's shadow (not solar)
+	salvage_bonus : f32;     // + share of each salvage haul
+	mass : f32;              // t
+	unlock : i32;            // technology id, 0 = none
+}
+
+fn noAttach(name : []const u8, effect : []const u8, steel : i32, electronics : i32, polymers : i32, parts : i32, mass : f32, unlock : i32) : AttachStats {
+	return {
+		.name = name, .effect = effect, .steel = steel, .electronics = electronics, .polymers = polymers, .parts = parts, .power = 0.0, .cooling = 0.0,
+		.co2_scrub = 0.0, .o2_store = 0.0, .fuel_store = 0.0, .mixed_store = 0.0, .sort_bonus = 0.0, .contact_bonus = 0.0, .radar = false, .always_on = false, .salvage_bonus = 0.0,
+		.mass = mass, .unlock = unlock
+	};
+}
+
+// cards and attachment records use 1..ATTACH_COUNT
+fn attachKind(index : i32) : AttachKind {
+	match index {
+		case 1: return .Solar;
+		case 2: return .Vent;
+		case 3: return .Crate;
+		case 4: return .FuelTank;
+		case 5: return .O2Tank;
+		case 6: return .Scrubber;
+		case 7: return .Light;
+		case 8: return .Antenna;
+		case 9: return .Dish;
+		case 10: return .Radar;
+		case:
+	}
+	return .Rtg;
+}
+
+fn attachStats(kind : AttachKind) : AttachStats {
+	match kind {
+		case .Solar:
+			var s = noAttach("Small solar panel", "+2 kW power", 10, 15, 5, 5, 0.1, 0); s.power = 2.0; return s;
+		case .Vent:
+			var s = noAttach("Heat vent", "+3 kW cooling", 15, 2, 5, 5, 0.1, 0); s.cooling = 3.0; return s;
+		case .Crate:
+			var s = noAttach("Storage crate", "+400 kg cargo hold", 20, 0, 10, 2, 0.2, 0); s.mixed_store = 400.0; return s;
+		case .FuelTank:
+			var s = noAttach("Fuel tank", "+250 kg propellant", 25, 2, 5, 5, 0.3, 0); s.fuel_store = 250.0; return s;
+		case .O2Tank:
+			var s = noAttach("Oxygen tank", "+2 000 L oxygen", 25, 2, 5, 5, 0.3, 0); s.o2_store = 2000.0; return s;
+		case .Scrubber:
+			var s = noAttach("CO2 scrubber pack", "removes 390 L CO2/day, -0.5 kW", 10, 20, 10, 10, 0.2, 1); s.co2_scrub = 0.27; s.power = -0.5; return s;
+		case .Light:
+			var s = noAttach("Work light", "+10% sorting (Central Module), -0.3 kW", 5, 5, 2, 2, 0.05, 11); s.sort_bonus = 0.1; s.power = -0.3; return s;
+		case .Antenna:
+			var s = noAttach("Antenna", "radar contacts 20% more often (max 1)", 10, 15, 2, 5, 0.1, 12); s.contact_bonus = 0.2; return s;
+		case .Dish:
+			var s = noAttach("Comms dish", "+10% salvage (max 2)", 20, 25, 5, 10, 0.3, 13); s.salvage_bonus = 0.1; return s;
+		case .Rtg:
+			var s = noAttach("Radioisotope generator", "+5 kW, day and night", 40, 60, 20, 30, 0.4, 10); s.power = 5.0; s.always_on = true; return s;
+		case .Radar:
+			var s = noAttach("Radar", "finds mission contacts, -1 kW", 20, 40, 10, 15, 0.3, 27); s.radar = true; s.power = -1.0; return s;
+	}
+	return noAttach("", "", 0, 0, 0, 0, 0.0, 0);
+}
+
+// ---- racks ------------------------------------------------------------------------------------------------------------------------------
+// Fitted into a module's internal rack slots (defs.rackSlots). They decide what a hull does. HP, wear, repair and dismantling work like
+// attachments; power is drawn only while online. Workshop benches sort mixed salvage (SORT_KG_PER_HOUR each). Units as above.
+enum RackKind {
+	Berth,
+	O2Gen,
+	Scrubber,
+	Hydroponics,
+	GreenhouseBed,
+	Storage,
+	Fridge,
+	Battery,
+	Research,
+	Workshop,
+	Medical,
+	Exercise,
+	Recycler,
+	FuelProducer
+}
+
+comptime RACK_COUNT = 14;
+
+struct RackStats {
+	name : []const u8;
+	effect : []const u8;
+	theme : i32;             // hull dressing it asks for (modgen.evox T_*)
+	steel : i32;
+	electronics : i32;
+	polymers : i32;
+	parts : i32;
+	power : f32;             // kW drawn while online
+	crew : i32;
+	o2 : f32;
+	food : f32;
+	co2_scrub : f32;
+	research : f32;
+	battery : f32;
+	food_store : f32;
+	mixed_store : f32;
+	sorts : bool;            // a workshop bench: sorts mixed salvage
+	exercise : bool;         // an exercise machine: a crew member using it regains fitness
+	medical : bool;          // a medical rack: heals injured crew
+	water_recovery : f32;    // share of the used water it gives back (water recycler)
+	fuel_rate : f32;         // kg of propellant a day made from water (fuel producer)
+	large_only : bool;       // only in a Large hull
+	mass : f32;
+	unlock : i32;
+}
+
+fn noRack(name : []const u8, effect : []const u8, theme : i32, steel : i32, electronics : i32, polymers : i32, parts : i32, power : f32, mass : f32, unlock : i32) : RackStats {
+	return {
+		.name = name, .effect = effect, .theme = theme, .steel = steel, .electronics = electronics, .polymers = polymers, .parts = parts, .power = power,
+		.crew = 0, .o2 = 0.0, .food = 0.0, .co2_scrub = 0.0, .research = 0.0, .battery = 0.0, .food_store = 0.0, .mixed_store = 0.0, .sorts = false,
+		.exercise = false, .medical = false, .water_recovery = 0.0, .fuel_rate = 0.0, .large_only = false, .mass = mass, .unlock = unlock
+	};
+}
+
+// cards and rack records use 1..RACK_COUNT
+fn rackKind(index : i32) : RackKind {
+	match index {
+		case 1: return .Berth;
+		case 2: return .O2Gen;
+		case 3: return .Scrubber;
+		case 4: return .Hydroponics;
+		case 5: return .GreenhouseBed;
+		case 6: return .Storage;
+		case 7: return .Fridge;
+		case 8: return .Battery;
+		case 9: return .Research;
+		case 10: return .Workshop;
+		case 11: return .Medical;
+		case 12: return .Exercise;
+		case 13: return .Recycler;
+		case:
+	}
+	return .FuelProducer;
+}
+
+// hull dressing themes (modgen.evox)
+comptime T_PLAIN = 0;
+comptime T_HABITAT = 1;
+comptime T_GREEN = 2;
+comptime T_LAB = 3;
+comptime T_MEDICAL = 4;
+comptime T_TECH = 5;
+comptime T_STORE = 6;
+
+fn rackStats(kind : RackKind) : RackStats {
+	match kind {
+		case .Berth:
+			var s = noRack("Berth", "+2 crew berths", T_HABITAT, 40, 5, 25, 5, 0.3, 0.5, 0); s.crew = 2; return s;
+		case .O2Gen:
+			var s = noRack("O2 generator", "+2 360 L O2/day", T_TECH, 20, 10, 10, 10, 2.0, 0.5, 0); s.o2 = 1.64; return s;
+		case .Scrubber:
+			var s = noRack("CO2 scrubber", "removes 1 150 L CO2/day", T_TECH, 15, 10, 10, 5, 1.0, 0.3, 0); s.co2_scrub = 0.8; return s;
+		case .Hydroponics:
+			var s = noRack("Hydroponics rack", "+5 000 kcal/day, +590 L O2/day", T_GREEN, 25, 10, 40, 15, 1.0, 0.6, 2); s.food = 5000.0; s.o2 = 0.41; s.co2_scrub = 0.35; return s;
+		case .GreenhouseBed:
+			var s = noRack("Greenhouse bed", "+7 500 kcal/day, +1 060 L O2/day (Large hull)", T_GREEN, 30, 10, 50, 15, 1.2, 0.8, 4); s.food = 7500.0; s.o2 = 0.74; s.co2_scrub = 0.62; s.large_only = true; return s;
+		case .Storage:
+			var s = noRack("Storage rack", "+40 000 kcal, +800 kg hold", T_STORE, 10, 2, 5, 5, 0.1, 0.3, 3); s.food_store = 40000.0; s.mixed_store = 800.0; return s;
+		case .Fridge:
+			var s = noRack("Refrigerated rack", "+100 000 kcal food storage", T_STORE, 15, 10, 10, 10, 0.7, 0.4, 3); s.food_store = 100000.0; return s;
+		case .Battery:
+			var s = noRack("Battery rack", "+10 kWh battery", T_TECH, 15, 25, 5, 10, 0.0, 0.3, 7); s.battery = 10.0; return s;
+		case .Research:
+			var s = noRack("Research bench", "+3 RP/h", T_LAB, 30, 45, 15, 20, 4.0, 0.4, 0); s.research = 3.0; return s;
+		case .Workshop:
+			var s = noRack("Workshop bench", "sorts mixed salvage", T_PLAIN, 25, 15, 10, 20, 0.5, 0.6, 26); s.sorts = true; return s;
+		case .Medical:
+			var s = noRack("Medical rack", "heals injured crew, +1 bed", T_MEDICAL, 30, 40, 30, 15, 2.5, 0.5, 22); s.crew = 1; s.medical = true; return s;
+		case .Exercise:
+			var s = noRack("Exercise machine", "crew regain fitness here", T_HABITAT, 30, 10, 10, 15, 0.3, 0.4, 24); s.exercise = true; return s;
+		case .Recycler:
+			var s = noRack("Water recycler", "gives back 80% of the water used", T_TECH, 20, 15, 20, 10, 1.5, 0.4, 21); s.water_recovery = WATER_RECOVERY; return s;
+		case .FuelProducer:
+			var s = noRack("Fuel producer", "water -> 8 kg propellant/day", T_TECH, 30, 25, 20, 20, 6.0, 0.8, 29); s.fuel_rate = FUEL_PRODUCER_KG_PER_DAY; return s;
+	}
+	return noRack("", "", T_PLAIN, 0, 0, 0, 0, 0.0, 0.0, 0);
+}
+
+// ---- crew work ---------------------------------------------------------------------------------------------------------------------------
+// Every action is done by the selected crew member and takes game time: building and fitting take WORK_MIN_PER_KG per kg of materials,
+// dismantling a share of that, repairs per kg of repair material. Salvage runs, missions and reboost burns keep the crew member busy for their
+// duration. Workshop and research benches only work while a crew member is assigned to them.
+const WORK_MIN_PER_KG : f32 = 5.0;            // a Standard hull (125 kg) takes ~10 h, a berth rack ~6 h, a small solar panel ~3 h
+const WORK_MIN_MINUTES : f32 = 30.0;          // no job is shorter
+const DISMANTLE_FACTOR : f32 = 0.25;          // of the building time
+const REPAIR_MIN_PER_KG : f32 = 6.0;          // per kg of repair material (steel + polymers)
+comptime CREW_MAX = 24;
+
+// ---- crew stats ------------------------------------------------------------------------------------------------------------------------------
+// Every crew member has four stats from 1 to 10, rolled when they join: each STAT_ROLL_MIN..STAT_ROLL_MAX, then one random specialty gets
+// +STAT_SPECIALTY (capped at 10). A stat turns into a multiplier STAT_BASE + STAT_STEP * stat: 5 is average (x1.0), 1 is x0.68, 10 is x1.4.
+// What each job uses (a pair is averaged):
+//   building, dismantling, fitting racks and attachments ... speed      strength + dexterity
+//   repairs, building a shuttle ......................... speed      dexterity + intelligence
+//   research bench ...................................... RP/h       intelligence
+//   workshop parts / kits / drills ...................... speed      intelligence
+//   workshop sorting .................................... kg/h       strength
+//   missions (pilot / EVA): time away / endurance, failure risk * (2 - dexterity multiplier), haul (salvage, steel) * strength
+comptime STAT_STR = 0;
+comptime STAT_INT = 1;
+comptime STAT_DEX = 2;
+comptime STAT_END = 3;
+comptime STAT_COUNT = 4;
+const STAT_BASE : f32 = 0.6;
+const STAT_STEP : f32 = 0.08;
+const STAT_ROLL_MIN : i32 = 2;
+const STAT_ROLL_MAX : i32 = 7;
+const STAT_SPECIALTY : i32 = 3;
+
+fn statName(i : i32) : []const u8 {
+	match i {
+		case 0: return "Strength";
+		case 1: return "Intelligence";
+		case 2: return "Dexterity";
+		case:
+	}
+	return "Endurance";
+}
+
+fn statFactor(v : i32) : f32 {
+	return STAT_BASE + STAT_STEP * (v as f32);
+}
+
+// ---- fitness ---------------------------------------------------------------------------------------------------------------------------------
+// Every crew member has fitness 0..1, lost steadily in microgravity (away on missions too). Using an exercise machine (rack; select the crew
+// member, "use" in the module panel) restores it at FITNESS_GAIN_PER_HOUR x the machine's HP; they step off by themselves when fully fit.
+// Below FITNESS_LOW every stat multiplier of theirs drops, linearly to FITNESS_MIN_FACTOR at 0 (work speed, bench output, missions).
+const FITNESS_START : f32 = 1.0;
+const FITNESS_DECAY_PER_DAY : f32 = 0.1;     // 10% a game day: about half an hour of exercise a day keeps it up
+const FITNESS_GAIN_PER_HOUR : f32 = 0.25;
+const FITNESS_LOW : f32 = 0.5;
+const FITNESS_MIN_FACTOR : f32 = 0.5;
+
+fn fitnessFactor(f : f32) : f32 {
+	if f >= FITNESS_LOW { return 1.0; }
+	const t = f <= 0.0 ? 0.0 : f / FITNESS_LOW;
+	return FITNESS_MIN_FACTOR + (1.0 - FITNESS_MIN_FACTOR) * t;
+}
+
+fn crewName(i : i32) : []const u8 {
+	match i % 24 {
+		case 0: return "Ada";
+		case 1: return "Bram";
+		case 2: return "Chen";
+		case 3: return "Dana";
+		case 4: return "Emil";
+		case 5: return "Fern";
+		case 6: return "Goran";
+		case 7: return "Hana";
+		case 8: return "Ines";
+		case 9: return "Jonas";
+		case 10: return "Kira";
+		case 11: return "Lev";
+		case 12: return "Mira";
+		case 13: return "Nils";
+		case 14: return "Oona";
+		case 15: return "Pavel";
+		case 16: return "Rosa";
+		case 17: return "Sami";
+		case 18: return "Tove";
+		case 19: return "Uli";
+		case 20: return "Vera";
+		case 21: return "Wim";
+		case 22: return "Yara";
+		case:
+	}
+	return "Zeno";
+}
+
+// ---- workshop jobs ------------------------------------------------------------------------------------------------------------------------
+// A staffed workshop bench runs its selected job (module panel). Sorting is continuous (SORT_KG_PER_HOUR); the others run in batches: the
+// inputs are taken when a batch starts, the output arrives when it ends. Batch time is game minutes at full efficiency and bench HP.
+comptime JOB_SORT = 0;
+comptime JOB_PARTS = 1;
+comptime JOB_KITS = 2;
+comptime JOB_DRILLS = 3;
+comptime WORKSHOP_JOBS = 4;
+const PARTS_STEEL : f32 = 40.0;              // machine parts batch: 40 kg steel + 10 kg polymers + 5 kg electronics -> 45 kg parts
+const PARTS_POLYMERS : f32 = 10.0;
+const PARTS_ELECTRONICS : f32 = 5.0;
+const PARTS_OUT : f32 = 45.0;
+const PARTS_MINUTES : f32 = 600.0;
+const KIT_STEEL : f32 = 15.0;                // repair kit: 15 kg steel + 6 kg polymers -> 1 kit
+const KIT_POLYMERS : f32 = 6.0;
+const KIT_MINUTES : f32 = 180.0;
+const KIT_TONNES : f32 = 1.5;                // one kit restores 100% HP of 1.5 t of station (the material of a 1.5 t repair)
+const KIT_REPAIR_MINUTES : f32 = 30.0;       // a repair done with kits takes this long, whatever its size
+const DRILL_STEEL : f32 = 30.0;              // mining drill (an asteroid mission uses one up): 30 kg steel + 15 kg parts -> 1 drill
+const DRILL_PARTS : f32 = 15.0;
+const DRILL_MINUTES : f32 = 360.0;
+
+fn workshopJobName(job : i32) : []const u8 {
+	match job {
+		case 1: return "parts";
+		case 2: return "kits";
+		case 3: return "drills";
+		case:
+	}
+	return "sort";
+}
+
+// ---- technologies ---------------------------------------------------------------------------------------------------------------------
+// Research benches (RP per game hour) pay for one selected technology at a time. A technology needs its prerequisites researched first, then
+// its cost in RP. It gives a bonus (multipliers below, applied in sim.evox / hud.evox) and/or unlocks buildables (their `unlock` field above holds the id).
+// Ids are 1..TECH_COUNT; four branches (the tree layout is in tools/gen_hud.py): life support and medicine 1..5 and 21..24 and 29, power and thermal 6..10 and 25, salvage and missions 11..15 and 26..28, orbit and station 16..20, 30 and 31.
+// The tree layout (columns, rows) is in tools/gen_hud.py and has to be kept in sync with the prerequisites here.
+comptime TECH_COUNT = 31;
+const TECH_CO2_SCRUB : f32 = 1.15;        // Atmosphere Control: x CO2 removal
+const TECH_FOOD : f32 = 1.2;              // Hydroponics: x food production
+const TECH_FOOD_STORE : f32 = 1.25;       // Cold Storage: x food storage
+const TECH_O2 : f32 = 1.2;                // Greenhouse: x oxygen production
+const TECH_FITNESS : f32 = 1.5;           // Medical Training: x fitness gained on exercise machines
+const TECH_COOLING : f32 = 1.15;          // Thermal Management: x cooling
+const TECH_BATTERY : f32 = 1.25;          // Energy Storage: x battery capacity
+const TECH_SOLAR : f32 = 1.15;            // Solar Tracking: x power production
+const TECH_HEAT : f32 = 0.85;             // Heat Recycling: x waste heat
+const TECH_POWER_USE : f32 = 0.9;         // Power Buses: x power consumption
+const TECH_SORT : f32 = 1.15;             // Salvage Sorting: x sorting speed
+const TECH_RISK : f32 = 0.9;              // Signal Analysis: x mission risk
+const TECH_HAUL : f32 = 1.1;              // Long-Range Comms: x mission haul
+const TECH_MISSION_TIME : f32 = 0.85;     // EVA Protocols: x mission duration
+const TECH_O2_STORE : f32 = 1.25;         // Pressure Vessels: x oxygen storage
+const TECH_BOOST_FUEL : f32 = 0.8;        // Efficient Burns: x reboost propellant
+const TECH_DECAY : f32 = 0.8;             // Aerobraking: x orbital decay
+const TECH_MASS : f32 = 0.9;              // Lightweight Alloys: x station mass
+
+struct TechStats {
+	name : []const u8;
+	effect : []const u8;     // bonus and unlocks, one short line
+	cost : i32;              // RP
+	req_a : i32;             // prerequisite technology ids, 0 = none
+	req_b : i32;
+	branch : i32;            // 0 life support, 1 power and thermal, 2 salvage and missions, 3 orbit and station
+}
+
+fn tech(name : []const u8, effect : []const u8, cost : i32, branch : i32, req_a : i32, req_b : i32) : TechStats {
+	return TechStats { .name = name, .effect = effect, .cost = cost, .req_a = req_a, .req_b = req_b, .branch = branch };
+}
+
+fn techStats(id : i32) : TechStats {
+	match id {
+		case 1: return tech("Atmosphere Control", "+15% CO2 removal. Unlocks CO2 scrubber pack.", 30, 0, 0, 0);
+		case 2: return tech("Hydroponics", "Unlocks hydroponics rack. +20% food.", 40, 0, 0, 0);
+		case 3: return tech("Cold Storage", "+25% food storage. Unlocks storage racks.", 60, 0, 2, 0);
+		case 4: return tech("Greenhouse", "+20% O2 production. Unlocks greenhouse bed.", 140, 0, 3, 0);
+		case 5: return tech("Medical Training", "Fitness regained 50% faster.", 110, 0, 22, 0);
+		case 6: return tech("Thermal Management", "+15% cooling. Unlocks radiator wing.", 25, 1, 0, 0);
+		case 7: return tech("Energy Storage", "+25% battery capacity. Unlocks battery rack.", 40, 1, 0, 0);
+		case 8: return tech("Solar Tracking", "+15% power from solar panels.", 70, 1, 25, 0);
+		case 9: return tech("Heat Recycling", "-15% waste heat.", 110, 1, 6, 8);
+		case 10: return tech("Power Buses", "-10% power use. Unlocks radioisotope generator.", 150, 1, 9, 0);
+		case 11: return tech("Salvage Sorting", "+15% sorting speed. Unlocks work light.", 30, 2, 26, 0);
+		case 12: return tech("Signal Analysis", "-10% mission risk. Unlocks antenna.", 45, 2, 0, 0);
+		case 13: return tech("Long-Range Comms", "+10% mission haul. Unlocks comms dish.", 90, 2, 12, 0);
+		case 14: return tech("EVA Protocols", "Missions take 15% less time.", 100, 2, 11, 13);
+		case 15: return tech("Docking Operations", "Unlocks docking hub.", 60, 2, 0, 0);
+		case 16: return tech("Pressure Vessels", "+25% O2 storage. Unlocks gas storage.", 40, 3, 0, 0);
+		case 17: return tech("Efficient Burns", "-20% reboost propellant.", 50, 3, 0, 0);
+		case 18: return tech("Large Structures", "Unlocks large hull.", 100, 3, 30, 0);
+		case 19: return tech("Aerobraking", "-20% orbital decay.", 120, 3, 17, 0);
+		case 20: return tech("Lightweight Alloys", "-10% station mass, less reboost fuel.", 160, 3, 18, 19);
+		case 21: return tech("Water Recycling", "Unlocks water recycler: gives back 80% of the water used.", 50, 0, 0, 0);
+		case 22: return tech("First Aid", "Unlocks medical rack: heals injured crew.", 90, 0, 0, 0);
+		case 23: return tech("Medical Bay", "Nurse seriously injured crew in a medical rack with a caregiver.", 150, 0, 22, 0);
+		case 24: return tech("Exercise Machine", "Unlocks exercise machine.", 60, 0, 0, 0);
+		case 25: return tech("Solar Arrays", "Unlocks solar wing.", 70, 1, 7, 0);
+		case 26: return tech("Workshop", "Unlocks workshop bench: sorting, parts, kits.", 40, 2, 0, 0);
+		case 27: return tech("Radar", "Unlocks radar: finds mission contacts.", 60, 2, 0, 0);
+		case 28: return tech("Shuttle", "Unlocks shuttles at a docking hub.", 100, 2, 15, 0);
+		case 29: return tech("Fuel Production", "Unlocks fuel producer: water to propellant.", 100, 0, 21, 0);
+		case 30: return tech("Standard Hulls", "Unlocks the standard hull.", 50, 3, 0, 0);
+		case 31: return tech("X Junctions", "Unlocks the X junction (wing mounts).", 50, 3, 30, 0);
+		case:
+	}
+	return tech("", "", 0, 0, 0, 0);
+}

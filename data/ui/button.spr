@@ -1,6 +1,0 @@
-type "patch9"
-top(12)
-bottom(52)
-left(12)
-right(52)
-texture "ui/button.tga"

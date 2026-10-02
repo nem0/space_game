@@ -1,0 +1,9 @@
+shader "/gfx/earth_atmosphere.hlsl"
+backface_culling true
+layer "transparent"
+uniform "Rayleigh color", { 0.08, 0.35, 1.0, 1.0 }
+uniform "Planet radius", 3000.0
+uniform "Shell radius", 3030.0
+uniform "Density", 0.75
+uniform "Glow", 1.1
+uniform "Nadir haze", 0.05

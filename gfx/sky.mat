@@ -1,0 +1,7 @@
+shader "/gfx/sky.hlsl"
+backface_culling false
+layer "transparent"
+uniform "Star brightness", 12.000000
+uniform "Star density", 1.600000
+uniform "Milky way", 0.100000
+uniform "Night dimming", 0.140000

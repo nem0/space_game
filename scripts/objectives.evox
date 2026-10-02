@@ -1,0 +1,273 @@
+// The opening objective chain (design/objectives.md): ids 1..OBJ_COUNT. An objective names a problem, never the solution. It becomes active when its
+// trigger holds (and stays active), and is done when its condition holds; sim.updateObjectives pays the RP reward once. Research objectives pay nothing.
+import "scripts/defs" as defs
+import "scripts/state" as st
+import "scripts/text" as text
+import "scripts/config" as cfg
+
+comptime OBJ_COUNT = 29;
+
+// ---- station queries -------------------------------------------------------------------------------------------------------------------------
+
+// a finished rack of this kind (cfg.rackKind index) that is not broken
+fn rackReady(kind : i32) : bool {
+	for i in 0..st.rack_count {
+		const r = st.racks[i];
+		if r.kind == kind and r.task != st.TASK_BUILD and r.hp > 0.0 and st.modules[r.host].task != st.TASK_BUILD { return true; }
+	}
+	return false;
+}
+
+// a rack of this kind with a living crew member working at it
+fn rackStaffed(kind : i32) : bool {
+	for i in 0..st.rack_count {
+		const r = st.racks[i];
+		if r.kind != kind or r.task == st.TASK_BUILD or r.staff < 0 or r.staff >= st.crew_slots { continue; }
+		if st.crew_list[r.staff].alive and st.crew_list[r.staff].job == st.JOB_BENCH { return true; }
+	}
+	return false;
+}
+
+fn moduleReady(kind : defs.ModuleKind) : bool {
+	for i in 0..st.module_count { if st.modules[i].kind == kind and st.modules[i].task != st.TASK_BUILD { return true; } }
+	return false;
+}
+
+fn hullBuilt() : bool {
+	for i in 0..st.module_count {
+		const k = st.modules[i].kind;
+		if (k == .SmallHull or k == .Hull or k == .LargeHull) and st.modules[i].task != st.TASK_BUILD { return true; }
+	}
+	return false;
+}
+
+fn slotsFree() : i32 {
+	var n : i32 = 0;
+	for i in 0..st.module_count { n += defs.rackSlots(st.modules[i].kind); }
+	return n - st.rack_count;
+}
+
+fn anyShuttle() : bool {
+	for i in 0..st.module_count { if st.modules[i].kind == .DockingHub and st.modules[i].ship != st.SHIP_NONE { return true; } }
+	return false;
+}
+
+fn unfitCrew() : bool {
+	for c in 0..st.crew_slots { if st.crew_list[c].alive and st.crew_list[c].fitness < cfg.FITNESS_LOW { return true; } }
+	return false;
+}
+
+fn done(id : i32) : bool {
+	return st.obj_done[id];
+}
+
+// ---- the objectives ------------------------------------------------------------------------------------------------------------------------
+
+fn title(id : i32) : []const u8 {
+	match id {
+		case 1: return "Fix the CO2";
+		case 2: return "Stop the descent";
+		case 3: return "Build the research bench";
+		case 4: return "Bring in materials";
+		case 5: return "Survive the night";
+		case 6: return "Feed the crew";
+		case 7: return "Stop the water loss";
+		case 8: return "Build another module";
+		case 9: return "Research fuel production";
+		case 10: return "More power: solar arrays";
+		case 11: return "Shed the heat: a radiator";
+		case 12: return "Set up a workshop";
+		case 13: return "Make our own fuel";
+		case 14: return "Reach a high orbit";
+		case 15: return "Research a medical rack";
+		case 16: return "Treat the injured";
+		case 17: return "Research a medical bay";
+		case 18: return "Nurse the badly hurt";
+		case 19: return "Research an exercise machine";
+		case 20: return "Keep fit";
+		case 21: return "Research a greenhouse";
+		case 22: return "Grow more food";
+		case 23: return "Research radar";
+		case 24: return "Build a radar";
+		case 25: return "Research a docking port";
+		case 26: return "Build a docking port";
+		case 27: return "Research a spaceship";
+		case 28: return "Build a spaceship";
+		case 29: return "Fly a mission";
+		case:
+	}
+	return "";
+}
+
+// what is wrong, not how to fix it
+fn hint(id : i32) : []const u8 {
+	match id {
+		case 1: return "The Central Module is at half strength and the CO2 is climbing. We cannot fully repair it.";
+		case 2: return "The orbit is decaying fast. Burn fuel to climb back above a safe altitude.";
+		case 3: return "Nothing can be researched, and nothing new unlocked, without one.";
+		case 4: return "We have almost nothing to build or repair with. There is wreckage nearby.";
+		case 5: return "Everything shuts down on the dark side of the Earth.";
+		case 6: return "The food is running out.";
+		case 7: return "The water is not recycled and the tank is draining.";
+		case 8: return "We are running out of room for racks.";
+		case 9: return "The fuel will run out. The orbit will keep decaying.";
+		case 10: return "The small panels do not give enough power for heavier machinery. Wings mount on an X junction.";
+		case 11: return "More machinery means more heat to get rid of. Wings mount on an X junction.";
+		case 12: return "Complex parts need a proper workshop.";
+		case 13: return "Produce enough propellant to keep the station up.";
+		case 14: return "Reach 420 km: the lower the orbit, the faster it decays.";
+		case 15: return "Someone was hurt. Hurt crew work slower until treated.";
+		case 16: return "Get an injured crew member treated.";
+		case 17: return "Someone is badly hurt. They cannot work and will die untreated.";
+		case 18: return "A badly hurt crew member needs a bed and a caregiver.";
+		case 19: return "Crew are getting out of shape in weightlessness.";
+		case 20: return "Get someone back in shape.";
+		case 21: return "We cannot feed another person, and there is a free berth.";
+		case 22: return "More efficient food production.";
+		case 23: return "We need to see what is out there.";
+		case 24: return "Fit a radar on the hull.";
+		case 25: return "Ships cannot dock here yet.";
+		case 26: return "Build a docking hub.";
+		case 27: return "We need a craft that can fly missions.";
+		case 28: return "Build a shuttle at the docking hub.";
+		case 29: return "Send the shuttle out and bring it back.";
+		case:
+	}
+	return "";
+}
+
+// RP paid when the objective is done (0 for research objectives)
+fn reward(id : i32) : f32 {
+	match id {
+		case 1, 2, 20: return cfg.OBJECTIVE_RP_S;
+		case 3, 4, 5, 6, 7, 8, 10, 11, 12, 16, 18, 24, 26: return cfg.OBJECTIVE_RP_M;
+		case 13, 14, 22, 28, 29: return cfg.OBJECTIVE_RP_L;
+		case:
+	}
+	return 0.0;
+}
+
+// the technology an objective is waiting on (0 = none): shown in its hint line while it is not researched
+fn needTech(id : i32) : i32 {
+	match id {
+		case 5: return 7;
+		case 6: return 2;
+		case 7: return 21;
+		case 9: return 29;
+		case 10: return 25;
+		case 11: return 6;
+		case 12: return 26;
+		case 15: return 22;
+		case 16: return 22;
+		case 17: return 23;
+		case 18: return 23;
+		case 19: return 24;
+		case 20: return 24;
+		case 21: return 4;
+		case 22: return 4;
+		case 23: return 27;
+		case 24: return 27;
+		case 25: return 15;
+		case 26: return 15;
+		case 27: return 28;
+		case 28: return 28;
+		case:
+	}
+	return 0;
+}
+
+fn trigger(id : i32) : bool {
+	match id {
+		case 1, 2, 3, 4, 5, 6, 7: return true;
+		case 8: return slotsFree() <= cfg.OBJECTIVE_SLOTS_LEFT;
+		case 9, 12: return done(3);
+		case 10: return done(9);
+		case 11: return done(9) or st.tot.overheating;
+		case 13: return done(9) and done(10) and done(11) and done(12);
+		case 14: return done(13);
+		case 15: return st.injuries_total >= 1;
+		case 16: return done(15);
+		case 17: return st.serious_total >= 1;
+		case 18: return done(17);
+		case 19: return unfitCrew();
+		case 20: return done(19);
+		case 21: return st.crew < st.tot.crew_cap and st.tot.food_prod * st.tot.efficiency < ((st.crew + 1) as f32) * cfg.FOOD_PER_CREW;
+		case 22: return done(21);
+		case 23: return done(12);
+		case 24: return done(23);
+		case 25: return done(24);
+		case 26: return done(25);
+		case 27: return done(26);
+		case 28: return done(27);
+		case 29: return done(28);
+		case:
+	}
+	return false;
+}
+
+fn complete(id : i32) : bool {
+	match id {
+		case 1: return st.tot.co2_ppm < cfg.CO2_WARN_PPM and st.module_count > 0 and st.modules[0].hp >= cfg.OBJECTIVE_REPAIRED_HP;
+		case 2: return st.res.altitude >= cfg.SAFE_ALT_KM;
+		case 3: return rackStaffed(9);
+		case 4: return st.eva_hauls >= 1;
+		case 5: return rackReady(8) and st.nights_ok >= 1;
+		case 6: return (rackReady(4) or rackReady(5)) and st.tot.food_prod * st.tot.efficiency >= (st.crew as f32) * cfg.FOOD_PER_CREW;
+		case 7: return rackReady(13);
+		case 8: return hullBuilt();
+		case 9: return st.hasTech(29);
+		case 10: return st.hasTech(25) and moduleReady(.SolarWing);
+		case 11: return st.hasTech(6) and moduleReady(.RadiatorWing);
+		case 12: return st.hasTech(26) and rackStaffed(10);
+		case 13: return st.fuel_made >= 1.0;
+		case 14: return st.res.altitude >= cfg.BOOST_TARGET_KM - 0.5;
+		case 15: return st.hasTech(22);
+		case 16: return rackReady(11) and st.treated >= 1;
+		case 17: return st.hasTech(23);
+		case 18: return st.nursed >= 1;
+		case 19: return st.hasTech(24);
+		case 20: return st.exercised >= 1;
+		case 21: return st.hasTech(4);
+		case 22: return rackReady(5);
+		case 23: return st.hasTech(27);
+		case 24: return st.tot.radar;
+		case 25: return st.hasTech(15);
+		case 26: return moduleReady(.DockingHub);
+		case 27: return st.hasTech(28);
+		case 28: return anyShuttle();
+		case 29: return st.ship_missions >= 1;
+		case:
+	}
+	return false;
+}
+
+// an active (triggered, not yet done) objective
+fn active(id : i32) : bool {
+	return st.obj_trig[id] and not st.obj_done[id];
+}
+
+// a done objective whose reward has not been claimed yet
+fn unclaimed(id : i32) : bool {
+	return st.obj_done[id] and not st.obj_claimed[id];
+}
+
+// live numbers shown under an objective's hint
+fn putLive(b : *text.Buf, id : i32) : void {
+	match id {
+		case 1:
+			text.put(b, "CO2 "); text.putGrouped(b, st.tot.co2_ppm as i32); text.put(b, " ppm, Central Module "); text.putInt(b, (st.modules[0].hp * 100.0 + 0.5) as i32); text.put(b, "%");
+		case 2:
+			text.put(b, "Altitude "); text.putF1(b, st.res.altitude); text.put(b, " km, losing "); text.putF1(b, st.tot.decay); text.put(b, " km/day, fuel "); text.putInt(b, st.res.fuel as i32); text.put(b, " kg - goal: above "); text.putInt(b, cfg.SAFE_ALT_KM as i32); text.put(b, " km");
+		case 4:
+			text.put(b, "Steel "); text.putInt(b, st.res.steel as i32); text.put(b, ", polymers "); text.putInt(b, st.res.polymers as i32); text.put(b, ", electronics "); text.putInt(b, st.res.electronics as i32); text.put(b, " kg");
+		case 6:
+			text.put(b, "Food "); text.putGrouped(b, st.res.food as i32); text.put(b, " kcal");
+		case 7:
+			text.put(b, "Water "); text.putInt(b, st.res.water as i32); text.put(b, " L");
+		case 13:
+			text.put(b, "Fuel "); text.putInt(b, st.res.fuel as i32); text.put(b, " kg, made "); text.putInt(b, st.fuel_made as i32); text.put(b, " kg");
+		case 14:
+			text.put(b, "Altitude "); text.putF1(b, st.res.altitude); text.put(b, " km - goal: "); text.putInt(b, cfg.BOOST_TARGET_KM as i32); text.put(b, " km");
+		case:
+	}
+}

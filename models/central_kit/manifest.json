@@ -1,0 +1,29 @@
+{
+ "sheet": "../parts_sheet + per-vertex AO (COLOR_0)",
+ "material": "parts_trim",
+ "triangles": {
+  "cen_wall_white": 688,
+  "cen_wall_green": 688,
+  "cen_wall_red": 688,
+  "cen_wall_blue": 688,
+  "cen_wall_green_vent": 742,
+  "cen_wall_red_vent": 742,
+  "cen_wall_blue_vent": 742,
+  "cen_wall_porthole": 1176,
+  "cen_wall_locker": 754,
+  "cen_wall_panel": 772,
+  "cen_wall_scrap": 688,
+  "cen_port": 4832,
+  "cen_roof_solar": 92,
+  "cen_roof_vent": 224,
+  "cen_roof_plain": 72,
+  "cen_under": 102,
+  "cen_hub_top": 804,
+  "cen_hub_bottom": 860
+ },
+ "facets": 16,
+ "band_apothem": 3.0,
+ "band_height": 1.5,
+ "port_face_from_centre": 4.0,
+ "note": "sector pieces are built for the facet facing +X with the origin at the module centre: place at the module origin, turn k*22.5 deg about the vertical axis"
+}

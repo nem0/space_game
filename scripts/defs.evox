@@ -1,0 +1,250 @@
+// Module catalog, socket layout and small math helpers.
+// Module stats (costs, effects, unlocks) are tuned in scripts/config.evox.
+// Coordinates here are ENGINE space (Y up): Blender (x, y, z) -> engine (x, z, -y). Modules have no model of their own: modgen.evox assembles each one
+// from kit parts (models/parts, models/central_kit); the port positions below follow from how it lays the parts out.
+import "core:vec3"
+import "core:quat"
+import "std:math" as math
+import "scripts/config" as cfg
+
+// Pressurised modules are generic hulls; what they do comes from the racks fitted inside (scripts/config.evox RackKind). Only modules whose shape is
+// their function are kinds of their own.
+enum ModuleKind {
+	Central,
+	SmallHull,
+	Hull,
+	LargeHull,
+	Junction,
+	SolarWing,
+	RadiatorWing,
+	GasStorage,
+	DockingHub
+}
+
+comptime KIND_COUNT = 9;
+
+struct PortDef {
+	pos : Vec3;
+	normal : Vec3;
+	wing : bool;          // true = external panel mount, false = docking port
+}
+
+struct ModuleDef {
+	name : []const u8;
+	steel : i32;
+	electronics : i32;
+	polymers : i32;
+	parts : i32;
+	power : f32;          // MW, positive = produces
+	crew : i32;           // berths
+	o2 : f32;             // oxygen units per game minute
+	food : f32;           // food units per game day
+	research : f32;       // research points per game hour
+	battery : f32;        // MWh of storage
+	cooling : f32;        // MW of heat rejection
+	o2_store : f32;
+	food_store : f32;
+	co2_scrub : f32;     // L of CO2 removed per game minute
+	volume : f32;        // pressurised m3
+	fuel_store : f32;    // kg of propellant tanks
+	mixed_store : f32;   // kg of cargo hold for unsorted salvage
+	mass : f32;          // t
+	unlock : i32;         // research points needed before it can be built
+	ports : i32;          // number of PortDef entries
+	mate : i32;           // which port mates with the socket we build on
+	wing_type : bool;     // attaches to a panel mount instead of a docking port
+	radius : f32;         // bounding radius for the overlap test
+	center : Vec3;        // bounding centre in module space
+}
+
+fn blank() : ModuleDef {
+	return {
+		.name = "", .steel = 0, .electronics = 0, .polymers = 0, .parts = 0, .power = 0.0, .crew = 0, .o2 = 0.0, .food = 0.0,
+		.research = 0.0, .battery = 0.0, .cooling = 0.0, .o2_store = 0.0, .food_store = 0.0, .co2_scrub = 0.0, .volume = 0.0, .fuel_store = 0.0, .mixed_store = 0.0, .mass = 0.0, .unlock = 0, .ports = 2, .mate = 1,
+		.wing_type = false, .radius = 2.0, .center = Vec3 { 0, 0, 0 }
+	};
+}
+
+// gameplay stats come from scripts/config.evox, the geometry (ports, bounds) is defined here
+fn getDef(kind : ModuleKind) : ModuleDef {
+	var d = blank();
+	const s = cfg.moduleStats(kind);
+	d.name = s.name; d.steel = s.steel; d.electronics = s.electronics; d.polymers = s.polymers; d.parts = s.parts; d.power = s.power; d.crew = s.crew;
+	d.o2 = s.o2; d.food = s.food; d.research = s.research; d.battery = s.battery; d.cooling = s.cooling; d.o2_store = s.o2_store;
+	d.food_store = s.food_store; d.co2_scrub = s.co2_scrub; d.volume = s.volume; d.fuel_store = s.fuel_store; d.mixed_store = s.mixed_store; d.mass = s.mass; d.unlock = s.unlock;
+	match kind {
+		case .Central: d.ports = 4; d.mate = 0; d.radius = 4.0;
+		case .SmallHull: d.radius = 1.6;
+		case .LargeHull: d.radius = 3.1;
+		case .Junction: d.ports = 6; d.radius = 1.6;
+		case .SolarWing, .RadiatorWing: d.ports = 1; d.mate = 0; d.wing_type = true; d.radius = 1.9; d.center = Vec3 { 1.75, 0, 0 };
+		case .GasStorage: d.ports = 1; d.mate = 0; d.wing_type = true; d.radius = 1.1; d.center = Vec3 { 1.0, 0, 0 };
+		// one docking port at -X; the shuttle berth at +X is not a station socket, the bounds cover the shuttle docked there
+		case .DockingHub: d.ports = 1; d.mate = 0; d.radius = 3.0; d.center = Vec3 { 2.2, 0, 0 };
+		case:
+	}
+	return d;
+}
+
+fn kindFromIndex(i : i32) : ModuleKind {
+	match i {
+		case 0: return .Central;
+		case 1: return .SmallHull;
+		case 2: return .Hull;
+		case 3: return .LargeHull;
+		case 4: return .Junction;
+		case 5: return .SolarWing;
+		case 6: return .RadiatorWing;
+		case 7: return .GasStorage;
+		case:
+	}
+	return .DockingHub;
+}
+
+// number of 1 m hull rings of a cylindrical module (modgen builds exactly this many)
+fn rings(kind : ModuleKind) : i32 {
+	match kind {
+		case .SmallHull, .Junction, .DockingHub: return 2;
+		case .LargeHull: return 5;
+		case:
+	}
+	return 3;
+}
+
+// distance of the +-X docking faces from the module centre: half the hull plus the 0.6 m dock
+fn tip(kind : ModuleKind) : f32 {
+	return (rings(kind) as f32) * 0.5 + 0.6;
+}
+
+fn port(kind : ModuleKind, i : i32) : PortDef {
+	match kind {
+		case .Central:
+			// port facets of the lens: dock faces 4 m from the centre
+			match i {
+				case 0: return { Vec3 { 4.0, 0, 0 }, Vec3 { 1, 0, 0 }, false };
+				case 1: return { Vec3 { -4.0, 0, 0 }, Vec3 { -1, 0, 0 }, false };
+				case 2: return { Vec3 { 0, 0, -4.0 }, Vec3 { 0, 0, -1 }, false };
+				case: return { Vec3 { 0, 0, 4.0 }, Vec3 { 0, 0, 1 }, false };
+			}
+		case .Junction:
+			// two hull rings with a dock at each end, two side ports (node_ports) and a mounting pad above and below
+			match i {
+				case 0: return { Vec3 { 1.6, 0, 0 }, Vec3 { 1, 0, 0 }, false };
+				case 1: return { Vec3 { -1.6, 0, 0 }, Vec3 { -1, 0, 0 }, false };
+				case 2: return { Vec3 { 0, 0, -2.0 }, Vec3 { 0, 0, -1 }, false };
+				case 3: return { Vec3 { 0, 0, 2.0 }, Vec3 { 0, 0, 1 }, false };
+				case 4: return { Vec3 { 0, 1.12, 0 }, Vec3 { 0, 1, 0 }, true };
+				case: return { Vec3 { 0, -1.12, 0 }, Vec3 { 0, -1, 0 }, true };
+			}
+		case .DockingHub:
+			// its only station port is the -X dock; the +X dock is the shuttle berth (SHIP_DOCK)
+			return { Vec3 { -tip(kind), 0, 0 }, Vec3 { -1, 0, 0 }, false };
+		case .SolarWing, .RadiatorWing, .GasStorage:
+			return { Vec3 { 0, 0, 0 }, Vec3 { -1, 0, 0 }, true };
+		case:
+	}
+	const t = tip(kind);
+	if i == 0 { return { Vec3 { t, 0, 0 }, Vec3 { 1, 0, 0 }, false }; }
+	return { Vec3 { -t, 0, 0 }, Vec3 { -1, 0, 0 }, false };
+}
+
+// ---- math -------------------------------------------------------------------------------------------------------------------------
+
+fn rotate(q : Quat, v : Vec3) : Vec3 {
+	const xyz : Vec3 = { q.x, q.y, q.z };
+	const t = cross(xyz, v) * 2.0;
+	return v + t * q.w + cross(xyz, t);
+}
+
+fn dist(a : Vec3, b : Vec3) : f32 {
+	return length(a - b);
+}
+
+// shortest rotation taking unit vector a onto unit vector b
+fn fromTo(a : Vec3, b : Vec3) : Quat {
+	const d = dot(a, b);
+	if d < -0.9999 {
+		// opposite: half turn around any axis perpendicular to a (prefer the up axis so modules stay upright)
+		var axis = cross(a, Vec3 { 0, 1, 0 });
+		if lengthSquared(axis) < 0.001 { axis = cross(a, Vec3 { 1, 0, 0 }); }
+		axis = normalize(axis);
+		return Quat { axis.x, axis.y, axis.z, 0.0 };
+	}
+	const c = cross(a, b);
+	const w = 1.0 + d;
+	const l = math.sqrt(c.x * c.x + c.y * c.y + c.z * c.z + w * w);
+	return Quat { c.x / l, c.y / l, c.z / l, w / l };
+}
+
+// ---- attachment slots ---------------------------------------------------------------------------------------------------------------
+// Hull places for attachments (scripts/config.evox, AttachKind), in module space. `rot` stands a part (modelled standing on +Y) on the hull there.
+// Tube modules: two per hull ring, on the 41 and 221 degree diagonals (free on every hull variant: windows, hatches and portholes sit
+// elsewhere). Central Module: the 8 odd roof facets. X Junction and the wing-type units: none (ports and pads fill the hull).
+struct SlotDef {
+	pos : Vec3;
+	rot : Quat;
+}
+
+comptime CENTRAL_SLOTS = 8;
+const ROOF_R : f32 = 2.05;        // facet centre, metres from the axis
+const ROOF_H : f32 = 1.2;         // roof surface height there
+const ROOF_TILT : f32 = -0.33;    // the roof slopes down outward by ~19 degrees
+
+// internal rack slots (scripts/config.evox RackKind)
+fn rackSlots(kind : ModuleKind) : i32 {
+	match kind {
+		case .Central: return 6;
+		case .SmallHull: return 4;
+		case .Hull: return 6;
+		case .LargeHull: return 10;
+		case:
+	}
+	return 0;
+}
+
+fn slotCount(kind : ModuleKind) : i32 {
+	match kind {
+		case .Central: return CENTRAL_SLOTS;
+		case .Junction, .SolarWing, .RadiatorWing, .GasStorage: return 0;
+		case:
+	}
+	return rings(kind) * 2;
+}
+
+fn axisQuat(axis : Vec3, angle : f32) : Quat {
+	const s = math.sin(angle * 0.5);
+	return Quat { axis.x * s, axis.y * s, axis.z * s, math.cos(angle * 0.5) };
+}
+
+// roof facet the Central Module's slot i sits on (facets are 22.5 degrees apart; odd ones carry slots)
+fn centralFacet(i : i32) : i32 {
+	return i * 2 + 1;
+}
+
+fn slot(kind : ModuleKind, i : i32) : SlotDef {
+	if kind == .Central {
+		const a = (centralFacet(i) as f32) * 3.14159265 / 8.0;
+		// Blender (r cos a, r sin a, h) -> engine (x, z, -y); yaw a about the vertical, then the outward roof tilt about the facet's tangent
+		return { Vec3 { ROOF_R * math.cos(a), ROOF_H, -ROOF_R * math.sin(a) }, axisQuat(Vec3 { 0, 1, 0 }, a) * axisQuat(Vec3 { 0, 0, 1 }, ROOF_TILT) };
+	}
+	const n = rings(kind);
+	const x = -(n as f32) * 0.5 + 0.5 + ((i / 2) as f32);
+	const deg : f32 = i % 2 == 0 ? 41.0 : 221.0;
+	const t = deg * 3.14159265 / 180.0;
+	const r : f32 = 1.03;
+	// as modgen.onHull: Blender (x, r cos t, r sin t), turned (t - 90 degrees) about the hull axis
+	return { Vec3 { x, r * math.sin(t), -r * math.cos(t) }, axisQuat(Vec3 { 1, 0, 0 }, t - 3.14159265 * 0.5) };
+}
+
+// pose of an attachment in its host module's space. Solar panels and vents on the Central Module are whole roof facets (modgen.attachModel),
+// posed like the roof piece they replace; everything else stands on the slot, turned `roll` quarter turns about the slot normal
+fn attachPose(host : ModuleKind, slot_index : i32, kind_index : i32, roll : i32, pos : *Vec3, rot : *Quat) : void {
+	if host == .Central and (kind_index == 1 or kind_index == 2) {
+		pos.* = Vec3 { 0, 0, 0 };
+		rot.* = axisQuat(Vec3 { 0, 1, 0 }, (centralFacet(slot_index) as f32) * 3.14159265 / 8.0);
+		return;
+	}
+	const s = slot(host, slot_index);
+	pos.* = s.pos;
+	rot.* = s.rot * axisQuat(Vec3 { 0, 1, 0 }, (roll as f32) * 3.14159265 * 0.5);
+}

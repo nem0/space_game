@@ -1,0 +1,448 @@
+// Shared game state: placed modules, free sockets, resources, timers and the message log.
+import "core:vec3"
+import "core:quat"
+import "core:entity"
+import "scripts/defs" as defs
+import "scripts/config" as cfg
+import "core:random" as rnd
+
+struct ModuleInst {
+	kind : defs.ModuleKind;
+	first_part : i32; // a module is a run of kit parts in `parts` (assembled by modgen.evox)
+	part_count : i32;
+	pos : Vec3; // station-local construction pose; station_orbit applies the world frame
+	rot : Quat;
+	hp : f32;   // condition 0..1: scales the module's production
+	seed : u32;  // layout seed (modgen), kept so the hull can be re-dressed
+	theme : i32; // hull dressing currently shown (modgen T_*)
+	task : i32;  // TASK_*: work under way on it
+	task_left : f32;  // game minutes of work left
+	task_total : f32;
+	worker : i32;     // crew index doing it (-1 = nobody: paused)
+	share : f32;      // repairs: share of the missing HP paid for
+	ship : i32;       // Docking Hub: SHIP_* state of the shuttle berthed there
+}
+
+// a rack fitted inside a module (scripts/config.evox RackKind)
+struct RackInst {
+	kind : i32;   // 1..cfg.RACK_COUNT
+	host : i32;   // module index
+	hp : f32;
+	task : i32;
+	task_left : f32;
+	task_total : f32;
+	worker : i32;
+	staff : i32;  // crew index working at this bench (-1 = none)
+	job : i32;    // workshop bench: cfg.JOB_* it runs
+	batch : f32;  // minutes of work left on the batch in progress (0 = none started)
+}
+
+// an attachment on a module's hull slot (scripts/config.evox AttachKind, defs.slot)
+struct AttachInst {
+	kind : i32;          // 1..cfg.ATTACH_COUNT
+	host : i32;          // module index
+	slot : i32;
+	roll : i32;          // quarter turns about the slot normal
+	hp : f32;
+	entity : Entity;
+	task : i32;
+	task_left : f32;
+	task_total : f32;
+	worker : i32;
+}
+
+// one kit part of a module: its own entity, posed relative to the module
+struct PartInst {
+	entity : Entity;
+	pos : Vec3;
+	rot : Quat;
+}
+
+struct Socket {
+	pos : Vec3; // station-local, so orbiting cannot drift docking/collision calculations
+	normal : Vec3;
+	wing : bool;
+	used : bool;
+	owner : i32;
+}
+
+struct Res {
+	steel : f32;
+	electronics : f32;
+	polymers : f32;
+	parts : f32;
+	o2 : f32;
+	food : f32;
+	rp : f32;
+	battery : f32;
+	minutes : f32;          // game minutes since start
+	co2 : f32;              // L of CO2 in the cabin air
+	fuel : f32;             // kg of propellant
+	altitude : f32;         // km above the surface
+	mixed : f32;            // kg of unsorted salvage
+	kits : f32;             // repair kits (workshop)
+	drills : f32;           // mining drills (workshop), used up by asteroid missions
+	water : f32;            // L in the tank
+}
+
+// recomputed every frame from the placed modules
+struct Totals {
+	power_prod : f32;
+	power_cons : f32;
+	crew_cap : i32;
+	o2_prod : f32;
+	food_prod : f32;
+	research : f32;
+	batt_cap : f32;
+	cooling : f32;
+	o2_cap : f32;
+	food_cap : f32;
+	power_ratio : f32;      // 1 = fully powered
+	efficiency : f32;       // power ratio, reduced further when overheating
+	heat : f32;
+	overheating : bool;
+	co2_scrub : f32;        // L/min the scrubbers and plants can remove at full efficiency
+	volume : f32;           // pressurised m3
+	co2_ppm : f32;
+	sort_bonus : f32;       // from attachments (work lights)
+	contact_bonus : f32;    // antennas
+	radar : bool;           // a working radar: contacts are picked up
+	salvage_bonus : f32;    // dishes
+	co2_efficiency : f32;   // output multiplier from the crew's CO2 headaches (1 = none)
+	fuel_cap : f32;         // kg
+	mass : f32;             // t
+	decay : f32;            // km per game day at the current altitude
+	boost_fuel_per_km : f32;
+	mixed_cap : f32;        // kg of cargo hold
+	sorting : bool;         // mixed salvage is being sorted (draws power)
+	sort_rate : f32;        // kg/h the workshop benches sort at full efficiency (with work lights)
+	water_recovery : f32;   // share of the used water the recyclers give back
+	fuel_rate : f32;        // kg/day the fuel producers make at full efficiency
+	medical : bool;         // a working medical rack
+	bay : bool;             // a medical bay: a working medical rack and Medical Bay researched
+	eclipse : bool;         // the station is in Earth's shadow: solar power is zero
+}
+
+struct Msg {
+	text : [160]u8;
+	len : i32;
+}
+
+var modules : [48]ModuleInst = undefined;
+var module_count : i32 = 0;
+var parts : [2048]PartInst = undefined;
+var part_count : i32 = 0;
+var racks : [256]RackInst = undefined;
+var rack_count : i32 = 0;
+var attachments : [256]AttachInst = undefined;
+var attach_count : i32 = 0;
+var sockets : [200]Socket = undefined;
+var socket_count : i32 = 0;
+var selected : i32 = 0;
+
+// click-to-place: a build card arms `build_kind`, the mouse ray picks a socket, a translucent ghost shows the module there, LMB builds it
+var build_kind : i32 = 0;       // kind index (1..12) being placed, 0 = not placing
+var build_roll : i32 = 0;       // quarter turns of the armed module about the socket axis (R key): a junction turned 90 degrees opens ports up and down
+var build_seed : u32 = 1;       // layout seed: the ghost and the module built from it are the same
+var cam_right : Vec3 = Vec3 { 1.0, 0.0, 0.0 };   // camera axes and distance in station-local coordinates (orbit.update), for the build animation
+var cam_up : Vec3 = Vec3 { 0.0, 1.0, 0.0 };
+var cam_dist : f32 = 22.0;
+var mouse_x : f32 = 0.0;
+var mouse_y : f32 = 0.0;
+var build_rack : i32 = 0;       // rack kind (1..) being fitted, 0 = none; exclusive with build_kind and build_attach
+var build_attach : i32 = 0;     // attachment kind (1..) being placed, 0 = none; never together with build_kind
+var aim_host : i32 = -1;        // module and slot under the mouse ray while placing an attachment
+var aim_slot : i32 = -1;
+var selected_attach : i32 = -1;  // attachment clicked in the world (info panel), -1 = none
+var selected_module : i32 = -1;   // module clicked in the world (info panel), -1 = none
+var aim_socket : i32 = -1;      // socket under the mouse ray, -1 = none
+
+var res : Res = undefined;
+// research: scripts/config.evox technologies 1..TECH_COUNT. Bench output goes into the selected one; with none selected it piles up in res.rp and is paid in when one is picked
+var tech_done : [32]bool = undefined;
+var tech_prog : [32]f32 = undefined;   // RP put into each technology so far
+var tech_active : i32 = 0;             // technology being researched, 0 = none
+var tot : Totals = undefined;
+var crew : i32 = 2;
+var speed : i32 = 1;            // 0 pause, 1, 2, 3
+var tab : i32 = 0;              // build tray category: 0 structural, 1 habitation, 2 utility, 3 power, 4 life support
+var over : bool = false;
+var menu : bool = true;           // the main menu is open (the game is paused behind it)
+var game_started : bool = false;  // the player has pressed START at least once
+var won : bool = false;
+var o2_timer : f32 = 0.0;
+var food_timer : f32 = 0.0;
+var co2_timer : f32 = 0.0;
+var co2_started : bool = false;   // the cabin air is filled to the background level once the station volume is known
+var stable_days : f32 = 0.0;
+var boosting : bool = false;     // a reboost burn is running
+var reentered : bool = false;    // the game was lost to orbital decay, not to crew deaths
+
+// objectives (scripts/objectives.evox): done / triggered flags by id and the counters their conditions read
+var obj_done : [32]bool = undefined;
+var obj_trig : [32]bool = undefined;
+var obj_claimed : [32]bool = undefined;   // a done objective stays listed until its reward is claimed in the OBJECTIVES panel
+var eva_hauls : i32 = 0;          // nearby-scrap runs that came back with their haul
+var ship_missions : i32 = 0;      // shuttle missions that returned
+var fuel_made : f32 = 0.0;        // kg of propellant made by fuel producers
+var nights_ok : i32 = 0;          // eclipses passed with a battery bank and no brownout
+var in_eclipse : bool = false;
+var eclipse_ok : bool = true;
+var injuries_total : i32 = 0;
+var serious_total : i32 = 0;
+var treated : i32 = 0;            // injured crew healed with a working medical rack
+var nursed : i32 = 0;             // seriously injured crew nursed back to health
+var exercised : i32 = 0;          // crew who finished a session on an exercise machine
+var water_timer : f32 = 0.0;
+
+// a radar contact (cfg.MissionKind): its rewards and costs are rolled when it appears
+struct Contact {
+	kind : i32;          // cfg.missionKind index
+	left : f32;          // game minutes it stays open
+	fuel : f32;          // kg of propellant the mission costs
+	crew : i32;          // survivors / settlers
+	mixed : f32;         // kg brought back
+	steel : f32;
+	electronics : f32;
+	polymers : f32;
+	fuel_gain : f32;
+	water : f32;         // L of water (ice) brought back
+}
+
+// a launched contact: the shuttle of `hub` (and the pilot `worker`) are away until `left` runs out; settlers have neither
+struct Mission {
+	c : Contact;
+	left : f32;
+	total : f32;
+	worker : i32;        // -1 = nobody flies it
+	hub : i32;           // Docking Hub module whose shuttle flies it, -1 = none
+	risk : f32;          // chance of failure, with the pilot's dexterity
+}
+
+var contacts : [4]Contact = undefined;    // cfg.CONTACT_MAX
+var contact_count : i32 = 0;
+var next_contact : f32 = 0.0;             // game minutes until the radar picks up the next contact
+var next_scrap : f32 = 0.0;               // game minutes until the next nearby scrap contact (only counts down while none is open)
+var missions : [4]Mission = undefined;    // cfg.MISSION_MAX
+var mission_count : i32 = 0;
+
+comptime TASK_NONE = 0;
+comptime TASK_BUILD = 1;
+comptime TASK_DISMANTLE = 2;
+comptime TASK_REPAIR = 3;
+comptime TASK_SHIP = 4;     // building the shuttle of a Docking Hub
+
+// shuttle of a Docking Hub (ModuleInst.ship)
+comptime SHIP_NONE = 0;
+comptime SHIP_DOCKED = 1;
+comptime SHIP_AWAY = 2;
+
+// what a crew member is doing
+comptime JOB_IDLE = 0;
+comptime JOB_WORK = 1;      // building, dismantling or repairing an item (the item holds the progress)
+comptime JOB_BENCH = 2;     // staffing a workshop / research bench
+comptime JOB_MISSION = 4;   // away flying a mission (shuttle)
+comptime JOB_BOOST = 5;     // flying a reboost burn
+comptime JOB_REPAIR_ALL = 6;
+comptime JOB_EXERCISE = 7;  // on an exercise machine (racks[].staff), until fully fit
+comptime JOB_HURT = 8;      // seriously injured: off all work until nursed back to health
+comptime JOB_CARE = 9;      // nursing a seriously injured crew member (CrewMember.care)
+
+struct CrewMember {
+	name : i32;      // cfg.crewName index
+	alive : bool;
+	job : i32;
+	stats : [4]i32;  // 1..10, cfg.STAT_* order
+	fitness : f32;   // 0..1 (cfg FITNESS_*)
+	injury : i32;       // INJURY_*
+	injury_left : f32;  // game minutes of healing / nursing still needed
+	doom : f32;         // serious injury: game minutes to live without nursing
+	care : i32;         // a caregiver (JOB_CARE): crew index of the patient, -1 = none
+}
+
+comptime INJURY_NONE = 0;
+comptime INJURY_MINOR = 1;
+comptime INJURY_SERIOUS = 2;
+
+var crew_list : [24]CrewMember = undefined;
+var crew_slots : i32 = 0;       // used entries of crew_list (dead ones stay, so indices are stable)
+var selected_crew : i32 = -1;
+var next_name : i32 = 0;
+var boost_worker : i32 = -1;
+var repair_all_left : f32 = 0.0;
+var repair_all_total : f32 = 0.0;
+var repair_all_worker : i32 = -1;
+var repair_all_share : f32 = 0.0;
+
+fn addCrew() : void {
+	if crew_slots >= 24 { return; }
+	var stats : [4]i32 = undefined;
+	for i in 0..cfg.STAT_COUNT { stats[i] = rnd.randRange(cfg.STAT_ROLL_MIN as u32, cfg.STAT_ROLL_MAX as u32) as i32; }
+	const special = rnd.randRange(0, (cfg.STAT_COUNT - 1) as u32) as i32;
+	stats[special] = stats[special] + cfg.STAT_SPECIALTY > 10 ? 10 : stats[special] + cfg.STAT_SPECIALTY;
+	crew_list[crew_slots] = CrewMember { next_name, true, JOB_IDLE, stats, cfg.FITNESS_START, INJURY_NONE, 0.0, 0.0, -1 };
+	crew_slots += 1;
+	next_name += 1;
+	crew += 1;
+}
+
+// frees whatever the crew member was doing (items they worked on pause, benches lose their worker)
+fn releaseCrew(c : i32) : void {
+	if c < 0 or c >= crew_slots { return; }
+	if crew_list[c].job == JOB_CARE { crew_list[c].care = -1; }
+	crew_list[c].job = JOB_IDLE;
+	for i in 0..module_count { if modules[i].worker == c { modules[i].worker = -1; } }
+	for i in 0..rack_count {
+		if racks[i].worker == c { racks[i].worker = -1; }
+		if racks[i].staff == c { racks[i].staff = -1; }
+	}
+	for i in 0..attach_count { if attachments[i].worker == c { attachments[i].worker = -1; } }
+	if boost_worker == c { boost_worker = -1; boosting = false; }
+	if repair_all_worker == c { repair_all_worker = -1; }
+}
+
+// a crew member at the station dies (not one away on a mission while others are aboard); returns their index
+fn killCrew() : i32 {
+	var victim : i32 = -1;
+	for i in 0..crew_slots {
+		if not crew_list[i].alive { continue; }
+		const away = crew_list[i].job == JOB_MISSION;
+		if victim < 0 or not away { victim = i; if not away { break; } }
+	}
+	if victim < 0 { return -1; }
+	releaseCrew(victim);
+	crew_list[victim].alive = false;
+	if selected_crew == victim { selected_crew = -1; }
+	crew -= 1;
+	return victim;
+}
+
+// the crew member chosen in the HUD popup, set only while the pending action is replayed (hud.evox runPending)
+var assignee : i32 = -1;
+// set by takeCrew when an action needed someone and none was chosen yet: the HUD then asks who, and replays the action with the answer
+var crew_wanted : bool = false;
+
+// the chosen crew member, ready for a new job (a bench worker is taken off the bench); -1 when none is chosen yet (crew_wanted is set, the HUD pops up the choice)
+fn takeCrew() : i32 {
+	const c = assignee;
+	if c < 0 or c >= crew_slots or not crew_list[c].alive { crew_wanted = true; return -1; }
+	const job = crew_list[c].job;
+	if job == JOB_BENCH or job == JOB_EXERCISE {
+		for i in 0..rack_count { if racks[i].staff == c { racks[i].staff = -1; } }
+		crew_list[c].job = JOB_IDLE;
+		return c;
+	}
+	if job != JOB_IDLE {
+		say("That crew member is busy - pick someone idle.");
+		return -1;
+	}
+	return c;
+}
+
+// multiplier of crew member c's stat (cfg.statFactor), lowered when they are out of shape (cfg.fitnessFactor) or hurt; 1 for nobody
+fn statOf(c : i32, stat : i32) : f32 {
+	if c < 0 or c >= crew_slots { return 1.0; }
+	const hurt = crew_list[c].injury == INJURY_MINOR ? cfg.INJURY_MINOR_FACTOR : 1.0;
+	return cfg.statFactor(crew_list[c].stats[stat]) * cfg.fitnessFactor(crew_list[c].fitness) * hurt;
+}
+
+// average multiplier of two stats
+fn stat2(c : i32, a : i32, b : i32) : f32 {
+	return (statOf(c, a) + statOf(c, b)) * 0.5;
+}
+
+// how fast crew member c works on an item task (TASK_*): building / dismantling / fitting with strength + dexterity, repairs and the shuttle
+// with dexterity + intelligence
+fn workSpeed(c : i32, task : i32) : f32 {
+	if task == TASK_REPAIR or task == TASK_SHIP { return stat2(c, cfg.STAT_DEX, cfg.STAT_INT); }
+	return stat2(c, cfg.STAT_STR, cfg.STAT_DEX);
+}
+
+fn crewName(c : i32) : []const u8 {
+	return cfg.crewName(crew_list[c].name);
+}
+
+var msgs : [6]Msg = undefined;
+var msg_count : i32 = 0;
+
+fn say(s : []const u8) : void {
+	// newest message goes to index 0
+	var i : i32 = 5;
+	while i > 0 {
+		msgs[i] = msgs[i - 1];
+		i -= 1;
+	}
+	var m : Msg = undefined;
+	m.len = 0;
+	for c in s {
+		if m.len < 160 {
+			m.text[m.len] = c;
+			m.len += 1;
+		}
+	}
+	msgs[0] = m;
+	if msg_count < 6 { msg_count += 1; }
+}
+
+fn msgText(i : i32) : []const u8 {
+	return msgs[i].text[0:msgs[i].len];
+}
+
+fn hasTech(id : i32) : bool {
+	return id >= 1 and id <= cfg.TECH_COUNT and tech_done[id];
+}
+
+// 0 locked (a prerequisite is missing), 1 available, 2 being researched, 3 researched
+fn techState(id : i32) : i32 {
+	if tech_done[id] { return 3; }
+	if tech_active == id { return 2; }
+	const t = cfg.techStats(id);
+	if (t.req_a > 0 and not tech_done[t.req_a]) or (t.req_b > 0 and not tech_done[t.req_b]) { return 0; }
+	return 1;
+}
+
+fn resetResources() : void {
+	for i in 0..32 { tech_done[i] = false; tech_prog[i] = 0.0; }
+	tech_active = 0;
+	res = Res { cfg.START_STEEL, cfg.START_ELECTRONICS, cfg.START_POLYMERS, cfg.START_PARTS, cfg.START_O2, cfg.START_FOOD, cfg.START_RP, cfg.START_BATTERY, 0.0, 0.0, cfg.START_FUEL, cfg.START_ALTITUDE_KM, cfg.START_MIXED, 0.0, 0.0, cfg.START_WATER };   // co2 is set by the simulation from the station volume
+	crew = 0;
+	crew_slots = 0;
+	selected_crew = -1;
+	next_name = 0;
+	for k in 0..cfg.START_CREW { addCrew(); }
+	boost_worker = -1;
+	repair_all_left = 0.0;
+	repair_all_worker = -1;
+	speed = 1;
+	over = false;
+	won = false;
+	o2_timer = 0.0;
+	food_timer = 0.0;
+	co2_timer = 0.0;
+	co2_started = false;
+	contact_count = 0;
+	mission_count = 0;
+	next_contact = cfg.CONTACT_FIRST_MINUTES;
+	next_scrap = cfg.SCRAP_FIRST_MINUTES;
+	stable_days = 0.0;
+	boosting = false;
+	reentered = false;
+	for i in 0..32 { obj_done[i] = false; obj_trig[i] = false; obj_claimed[i] = false; }
+	eva_hauls = 0; ship_missions = 0; fuel_made = 0.0; nights_ok = 0; in_eclipse = false; eclipse_ok = true;
+	injuries_total = 0; serious_total = 0; treated = 0; nursed = 0; exercised = 0; water_timer = 0.0;
+	module_count = 0;
+	part_count = 0;
+	socket_count = 0;
+	selected = 0;
+	build_kind = 0;
+	aim_socket = -1;
+	selected_module = -1;
+	selected_attach = -1;
+	build_attach = 0;
+	aim_host = -1;
+	aim_slot = -1;
+	attach_count = 0;
+	rack_count = 0;
+	build_rack = 0;
+	msg_count = 0;
+}

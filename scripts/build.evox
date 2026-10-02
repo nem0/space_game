@@ -1,0 +1,899 @@
+// Module placement: every module is assembled from kit parts (modgen.evox) and exposes sockets; building attaches a new module tip-to-tip (or onto a wing mount pad).
+import "core:world"
+import "core:log"
+import "core:entity"
+import "core:vec3"
+import "core:quat"
+import "core:dvec3"
+import "core:renderer/module"
+import "core:renderer/model_instance"
+import "scripts/defs" as defs
+import "scripts/config" as cfg
+import "scripts/state" as st
+import "scripts/text" as text
+import "scripts/station_orbit" as flight
+import "scripts/modgen" as gen
+import "scripts/orbit" as orbit
+import "core:random" as rnd
+import "std:math" as math
+
+fn toD(v : Vec3) : DVec3 {
+	return DVec3 { v.x as f64, v.y as f64, v.z as f64 };
+}
+
+// assembles a module from kit parts (the layout follows the seed) and returns the index of its first part; st.part_count grows by the part count
+fn spawn(world : World, kind : defs.ModuleKind, pos : Vec3, rot : Quat, seed : u32) : i32 {
+	const d = defs.getDef(kind);
+	const first = st.part_count;
+	gen.generate(kind, seed, 0);   // new hulls are plain until racks are fitted (redress)
+	const frame = flight.frameRotation();
+	for i in 0..gen.count {
+		if st.part_count >= 2048 { break; }
+		const p = gen.parts[i];
+		const e = world.createEntity();
+		e.setName(d.name);
+		e.setPosition(flight.toWorld(pos + defs.rotate(rot, p.pos)));
+		e.setRotation(frame * rot * p.rot);
+		if const mi = e.createModelInstance() {
+			mi.setPath(p.model);
+			if p.hidden { mi.setEnabled(false); }
+		}
+		st.parts[st.part_count] = st.PartInst { e, p.pos, p.rot };
+		st.part_count += 1;
+	}
+	logInfo("[game] spawn ", d.name);
+	return first;
+}
+
+// registers the module and exposes its free ports as sockets (a port that lines up with an existing free socket closes both)
+fn addModule(kind : defs.ModuleKind, first_part : i32, pos : Vec3, rot : Quat, mated : i32, seed : u32) : void {
+	const d = defs.getDef(kind);
+	const owner = st.module_count;
+	st.modules[owner] = st.ModuleInst { kind, first_part, st.part_count - first_part, pos, rot, 1.0, seed, 0, st.TASK_NONE, 0.0, 0.0, -1, 0.0, st.SHIP_NONE };
+	st.module_count += 1;
+	for i in 0..d.ports {
+		if i == mated { continue; }
+		const p = defs.port(kind, i);
+		const wp = pos + defs.rotate(rot, p.pos);
+		const wn = defs.rotate(rot, p.normal);
+		var closed = false;
+		for k in 0..st.socket_count {
+			if st.sockets[k].used or st.sockets[k].wing != p.wing { continue; }
+			if defs.dist(st.sockets[k].pos, wp) < 0.3 and dot(st.sockets[k].normal, wn) < -0.9 {
+				st.sockets[k].used = true;
+				closed = true;
+			}
+		}
+		if not closed and st.socket_count < 200 {
+			st.sockets[st.socket_count] = st.Socket { wp, wn, p.wing, false, owner };
+			st.socket_count += 1;
+		}
+	}
+}
+
+// places a module on a socket without paying or checking research (used for the starting station)
+fn placeFree(world : World, kind : defs.ModuleKind, socket_index : i32) : void {
+	const s = st.sockets[socket_index];
+	const d = defs.getDef(kind);
+	const port = defs.port(kind, d.mate);
+	const rot = defs.fromTo(port.normal, -s.normal);
+	const pos = s.pos - defs.rotate(rot, port.pos);
+	st.sockets[socket_index].used = true;
+	const seed = rnd.rand();
+	const first = spawn(world, kind, pos, rot, seed);
+	addModule(kind, first, pos, rot, d.mate, seed);
+}
+
+fn startStation(world : World) : void {
+	st.resetResources();
+	for i in 0..48 { g_ship_shown[i] = -1; }
+	const rot = Quat { 0.0, 0.0, 0.0, 1.0 };
+	const seed = rnd.rand();
+	const first = spawn(world, .Central, Vec3 { 0, 0, 0 }, rot, seed);
+	addModule(.Central, first, Vec3 { 0, 0, 0 }, rot, -1, seed);
+	// its racks: a berth (2 crew) and two storage racks (scripts/config.evox RackKind order); the workshop and research benches have to be researched / built
+	addRack(1, 0);
+	addRack(6, 0);
+	addRack(6, 0);
+	addRack(2, 0);   // O2 generator and CO2 scrubber: the station's life support (a module itself produces nothing)
+	addRack(3, 0);
+	// half broken: the module (cooling) and its racks (so the scrubber and the O2 generator run at half output)
+	st.modules[0].hp = cfg.CENTRAL_START_HP;
+	for i in 0..st.rack_count { st.racks[i].hp = cfg.CENTRAL_START_HP; }
+	// the Central Module's roof: 6 small solar panels and 2 heat vents (its listed stats are the bare hull)
+	for k in 0..defs.CENTRAL_SLOTS { spawnAttachment(world, (k == 2 or k == 6) ? 2 : (k == 4 ? 11 : 1), 0, k, 0); }
+	st.say("Warning: the central module is at half strength and the CO2 is rising. The orbit is decaying. See OBJECTIVES.");
+}
+
+fn freeCount() : i32 {
+	var n : i32 = 0;
+	for i in 0..st.socket_count { if not st.sockets[i].used { n += 1; } }
+	return n;
+}
+
+// keep the selection on a free socket; dir = +1 / -1 steps to the next / previous free one
+fn step(dir : i32) : void {
+	const n = st.socket_count;
+	if n == 0 { return; }
+	var i = st.selected;
+	for k in 0..n {
+		i = (i + dir + n) % n;
+		if not st.sockets[i].used { st.selected = i; return; }
+	}
+}
+
+fn ensureSelection() : void {
+	if st.socket_count == 0 { return; }
+	if st.selected >= st.socket_count { st.selected = 0; }
+	if st.sockets[st.selected].used { step(1); }
+}
+
+fn canAfford(d : defs.ModuleDef) : bool {
+	return st.res.steel >= (d.steel as f32) and st.res.electronics >= (d.electronics as f32) and st.res.polymers >= (d.polymers as f32) and st.res.parts >= (d.parts as f32);
+}
+
+fn unlocked(d : defs.ModuleDef) : bool {
+	return d.unlock == 0 or st.hasTech(d.unlock);
+}
+
+// does a module of this kind at this pose collide with the placed ones?
+fn blocked(kind : defs.ModuleKind, pos : Vec3, rot : Quat) : bool {
+	const d = defs.getDef(kind);
+	const c = pos + defs.rotate(rot, d.center);
+	for i in 0..st.module_count {
+		const o = st.modules[i];
+		const od = defs.getDef(o.kind);
+		const oc = o.pos + defs.rotate(o.rot, od.center);
+		if defs.dist(c, oc) < cfg.BUILD_OVERLAP * (d.radius + od.radius) { return true; }
+	}
+	return false;
+}
+
+// module pose that mates the kind's port with a socket
+fn matePose(kind : defs.ModuleKind, s : st.Socket, pos : *Vec3, rot : *Quat) : void {
+	const d = defs.getDef(kind);
+	const port = defs.port(kind, d.mate);
+	rot.* = defs.fromTo(port.normal, -s.normal);
+	// docking modules can be turned in quarter steps about the socket axis; the mated port sits on that axis, so it stays on the socket
+	if not d.wing_type and st.build_roll != 0 {
+		const half = (st.build_roll as f32) * 0.785398163;   // (roll * 90 degrees) / 2
+		const sn = math.sin(half);
+		rot.* = Quat { s.normal.x * sn, s.normal.y * sn, s.normal.z * sn, math.cos(half) } * rot.*;
+	}
+	pos.* = s.pos - defs.rotate(rot.*, port.pos);
+}
+
+// R key: next quarter turn of the armed module
+fn rotateArmed() : void {
+	st.build_roll = (st.build_roll + 1) % 4;
+}
+
+// "" if the module can be built on the socket, otherwise the reason it cannot
+fn check(kind : defs.ModuleKind, socket_index : i32) : []const u8 {
+	if socket_index < 0 or socket_index >= st.socket_count { return "No socket selected."; }
+	const s = st.sockets[socket_index];
+	if s.used { return "That socket is already used."; }
+	const d = defs.getDef(kind);
+	if d.wing_type != s.wing { return d.wing_type ? "This module needs an external panel mount (X junction pad)." : "This module needs a docking port."; }
+	if not unlocked(d) { return "Not researched yet."; }
+	if not canAfford(d) { return "Not enough materials."; }
+	var pos : Vec3 = undefined;
+	var rot : Quat = undefined;
+	matePose(kind, s, &pos, &rot);
+	if blocked(kind, pos, rot) { return "Something is in the way."; }
+	return "";
+}
+
+// returns "" on success, otherwise the reason it failed; the module gets the layout the ghost showed
+fn tryBuild(world : World, kind : defs.ModuleKind, socket_index : i32) : []const u8 {
+	const why = check(kind, socket_index);
+	if why.length > 0 { return why; }
+	const c = st.takeCrew();
+	if c < 0 { return "Select an idle crew member first."; }
+	const s = st.sockets[socket_index];
+	const d = defs.getDef(kind);
+	var pos : Vec3 = undefined;
+	var rot : Quat = undefined;
+	matePose(kind, s, &pos, &rot);
+
+	st.res.steel -= d.steel as f32;
+	st.res.electronics -= d.electronics as f32;
+	st.res.polymers -= d.polymers as f32;
+	st.res.parts -= d.parts as f32;
+	st.sockets[socket_index].used = true;
+	const first = spawn(world, kind, pos, rot, st.build_seed);
+	addModule(kind, first, pos, rot, d.mate, st.build_seed);
+	const mi = st.module_count - 1;
+	const minutes = workMinutes(kgOf(d.steel, d.electronics, d.polymers, d.parts));
+	st.modules[mi].task = st.TASK_BUILD;
+	st.modules[mi].task_left = minutes;
+	st.modules[mi].task_total = minutes;
+	st.modules[mi].worker = c;
+	st.crew_list[c].job = st.JOB_WORK;
+	st.build_seed = rnd.rand();
+	var b : text.Buf = undefined; text.clear(&b);
+	text.put(&b, st.crewName(c)); text.put(&b, " starts building: "); text.put(&b, d.name);
+	st.say(text.view(&b));
+	ensureSelection();
+	return "";
+}
+
+// ---- click-to-place: aim + ghost -------------------------------------------------------------------------------------------------------
+
+var g_ghost : [96]st.PartInst = undefined;
+var g_ghost_count : i32 = 0;
+var g_ghost_kind : i32 = 0;      // kind index the ghost parts were made for (0 = no ghost entities)
+var g_ghost_seed : u32 = 0;
+var g_ghost_ok : bool = false;   // material the ghost currently wears
+var g_ghost_pos : Vec3 = undefined;
+var g_ghost_rot : Quat = undefined;
+var g_ghost_shown : bool = false;
+var g_ghost_why : []const u8 = "";   // why the ghost cannot be built ("" = it can)
+
+fn ghostMaterial(ok : bool) : []const u8 {
+	return ok ? "gfx/ghost_ok.mat" : "gfx/ghost_bad.mat";
+}
+
+fn clearGhost(world : World) : void {
+	for i in 0..g_ghost_count { world.destroyEntity(g_ghost[i].entity); }
+	g_ghost_count = 0;
+	g_ghost_kind = 0;
+	g_ghost_shown = false;
+}
+
+fn makeGhost(world : World, index : i32, seed : u32, ok : bool) : void {
+	clearGhost(world);
+	gen.generate(defs.kindFromIndex(index), seed, 0);
+	for i in 0..gen.count {
+		const p = gen.parts[i];
+		const e = world.createEntity();
+		e.setName("Ghost");
+		if const mi = e.createModelInstance() {
+			mi.setPath(p.model);
+			mi.setMaterialOverride(0, ghostMaterial(ok));
+			if p.hidden { mi.setEnabled(false); }
+		}
+		g_ghost[i] = st.PartInst { e, p.pos, p.rot };
+	}
+	g_ghost_count = gen.count;
+	g_ghost_kind = index;
+	g_ghost_seed = seed;
+	g_ghost_ok = ok;
+}
+
+fn showGhost(visible : bool) : void {
+	if visible == g_ghost_shown { return; }
+	g_ghost_shown = visible;
+	for i in 0..g_ghost_count {
+		if const mi = g_ghost[i].entity.modelInstance() { mi.setEnabled(visible); }
+	}
+}
+
+// socket the mouse ray passes closest to (relative to how far away it is), among the free ones the armed module fits; -1 if none is close enough
+fn pickSocket(kind : defs.ModuleKind, mx : f32, my : f32) : i32 {
+	var o : Vec3 = undefined;
+	var dir : Vec3 = undefined;
+	if not orbit.aimRay(mx, my, &o, &dir) { return -1; }
+	const d = defs.getDef(kind);
+	var best : i32 = -1;
+	var best_score : f32 = 1.0;
+	for i in 0..st.socket_count {
+		const s = st.sockets[i];
+		if s.used or s.wing != d.wing_type { continue; }
+		const rel = s.pos - o;
+		const t = dot(rel, dir);
+		if t <= 0.0 { continue; }
+		const score = defs.dist(rel, dir * t) / (0.3 + 0.05 * t);   // < 1 = inside the aim tolerance, which grows with distance
+		if score < best_score { best_score = score; best = i; }
+	}
+	return best;
+}
+
+// call every frame: picks the socket under the cursor while a module is armed and keeps the ghost there
+fn updateGhost(world : World) : void {
+	if st.build_kind <= 0 {
+		st.aim_socket = -1;
+		if g_ghost_kind != 0 { clearGhost(world); }
+		return;
+	}
+	const kind = defs.kindFromIndex(st.build_kind);
+	st.aim_socket = pickSocket(kind, st.mouse_x, st.mouse_y);
+	if st.aim_socket < 0 { showGhost(false); g_ghost_why = ""; return; }
+	st.selected = st.aim_socket;
+	g_ghost_why = check(kind, st.aim_socket);
+	const ok = g_ghost_why.length == 0;
+	if g_ghost_kind != st.build_kind or g_ghost_seed != st.build_seed or g_ghost_ok != ok {
+		makeGhost(world, st.build_kind, st.build_seed, ok);
+		g_ghost_shown = true;
+	}
+	showGhost(true);
+	matePose(kind, st.sockets[st.aim_socket], &g_ghost_pos, &g_ghost_rot);
+	const frame = flight.frameRotation();
+	for i in 0..g_ghost_count {
+		const p = g_ghost[i];
+		p.entity.setPosition(flight.toWorld(g_ghost_pos + defs.rotate(g_ghost_rot, p.pos)));
+		p.entity.setRotation(frame * g_ghost_rot * p.rot);
+	}
+}
+
+// module whose bounding sphere the mouse ray hits first, -1 if none
+fn pickModule(mx : f32, my : f32) : i32 {
+	var o : Vec3 = undefined;
+	var dir : Vec3 = undefined;
+	if not orbit.aimRay(mx, my, &o, &dir) { return -1; }
+	var best : i32 = -1;
+	var best_t : f32 = 1000000.0;
+	for i in 0..st.module_count {
+		const m = st.modules[i];
+		const d = defs.getDef(m.kind);
+		const c = m.pos + defs.rotate(m.rot, d.center);
+		const t = dot(c - o, dir);
+		if t <= 0.0 or t >= best_t { continue; }
+		if defs.dist(c - o, dir * t) < d.radius { best_t = t; best = i; }
+	}
+	return best;
+}
+
+// LMB in the world: builds the armed module on the aimed socket; returns "" if nothing was tried or it worked, else the reason
+fn placeAimed(world : World, rack_host : i32) : []const u8 {
+	if st.build_attach > 0 { return st.aim_host >= 0 ? tryBuildAttach(world, st.build_attach, st.aim_host, st.aim_slot) : ""; }
+	if st.build_rack > 0 { return tryFitRack(st.build_rack, rack_host); }
+	if st.build_kind <= 0 or st.aim_socket < 0 { return ""; }
+	return tryBuild(world, defs.kindFromIndex(st.build_kind), st.aim_socket);
+}
+
+// ---- attachments -----------------------------------------------------------------------------------------------------------------------
+
+fn slotFree(host : i32, slot_index : i32) : bool {
+	for i in 0..st.attach_count { if st.attachments[i].host == host and st.attachments[i].slot == slot_index { return false; } }
+	return true;
+}
+
+fn attachLocal(host : i32, slot_index : i32, kind : i32, roll : i32, pos : *Vec3, rot : *Quat) : void {
+	defs.attachPose(st.modules[host].kind, slot_index, kind, roll, pos, rot);
+}
+
+// a solar panel or vent on a Central roof slot takes the place of that facet's plain roof piece
+fn setRoofHidden(host : i32, slot_index : i32, kind : i32, hidden : bool) : void {
+	const m = st.modules[host];
+	if not gen.replacesRoof(kind, m.kind == .Central) { return; }
+	const part = m.first_part + gen.centralRoofPart(defs.centralFacet(slot_index));
+	if const mi = st.parts[part].entity.modelInstance() { mi.setEnabled(not hidden); }
+}
+
+// creates the attachment entity and record (no cost, no checks)
+fn spawnAttachment(world : World, kind : i32, host : i32, slot_index : i32, roll : i32) : void {
+	if st.attach_count >= 256 { return; }
+	const m = st.modules[host];
+	const e = world.createEntity();
+	e.setName(cfg.attachStats(cfg.attachKind(kind)).name);
+	if const mi = e.createModelInstance() { mi.setPath(gen.attachModel(kind, m.kind == .Central)); }
+	var lp : Vec3 = undefined;
+	var lr : Quat = undefined;
+	attachLocal(host, slot_index, kind, roll, &lp, &lr);
+	e.setPosition(flight.toWorld(m.pos + defs.rotate(m.rot, lp)));
+	e.setRotation(flight.frameRotation() * m.rot * lr);
+	st.attachments[st.attach_count] = st.AttachInst { kind, host, slot_index, roll, 1.0, e, st.TASK_NONE, 0.0, 0.0, -1 };
+	st.attach_count += 1;
+	setRoofHidden(host, slot_index, kind, true);
+}
+
+fn canAffordAttach(s : cfg.AttachStats) : bool {
+	return st.res.steel >= (s.steel as f32) and st.res.electronics >= (s.electronics as f32) and st.res.polymers >= (s.polymers as f32) and st.res.parts >= (s.parts as f32);
+}
+
+fn attachUnlocked(s : cfg.AttachStats) : bool {
+	return s.unlock == 0 or st.hasTech(s.unlock);
+}
+
+// "" if the attachment can go on that slot, otherwise why not
+fn checkAttach(kind : i32, host : i32, slot_index : i32) : []const u8 {
+	if host < 0 or host >= st.module_count { return "Aim at a free hull slot."; }
+	if not slotFree(host, slot_index) { return "That slot is taken."; }
+	const s = cfg.attachStats(cfg.attachKind(kind));
+	if not attachUnlocked(s) { return "Not researched yet."; }
+	if not canAffordAttach(s) { return "Not enough materials."; }
+	return "";
+}
+
+fn tryBuildAttach(world : World, kind : i32, host : i32, slot_index : i32) : []const u8 {
+	const why = checkAttach(kind, host, slot_index);
+	if why.length > 0 { return why; }
+	const c = st.takeCrew();
+	if c < 0 { return "Select an idle crew member first."; }
+	const s = cfg.attachStats(cfg.attachKind(kind));
+	st.res.steel -= s.steel as f32;
+	st.res.electronics -= s.electronics as f32;
+	st.res.polymers -= s.polymers as f32;
+	st.res.parts -= s.parts as f32;
+	spawnAttachment(world, kind, host, slot_index, st.build_roll);
+	setRoofHidden(host, slot_index, kind, false);   // the plain roof piece stays until the fitted part has flown in
+	const ai = st.attach_count - 1;
+	const minutes = workMinutes(kgOf(s.steel, s.electronics, s.polymers, s.parts));
+	st.attachments[ai].task = st.TASK_BUILD;
+	st.attachments[ai].task_left = minutes;
+	st.attachments[ai].task_total = minutes;
+	st.attachments[ai].worker = c;
+	st.crew_list[c].job = st.JOB_WORK;
+	var b : text.Buf = undefined; text.clear(&b);
+	text.put(&b, st.crewName(c)); text.put(&b, " starts fitting: "); text.put(&b, s.name); text.put(&b, " on "); text.put(&b, defs.getDef(st.modules[host].kind).name);
+	st.say(text.view(&b));
+	return "";
+}
+
+// removes an attachment and returns part of its materials
+fn dismantle(world : World, i : i32) : void {
+	if i < 0 or i >= st.attach_count { return; }
+	if st.attachments[i].task != st.TASK_NONE { st.say("Someone is already working on that attachment."); return; }
+	const c = st.takeCrew();
+	if c < 0 { return; }
+	const s = cfg.attachStats(cfg.attachKind(st.attachments[i].kind));
+	const minutes = workMinutes(kgOf(s.steel, s.electronics, s.polymers, s.parts)) * cfg.DISMANTLE_FACTOR;
+	st.attachments[i].task = st.TASK_DISMANTLE;
+	st.attachments[i].task_left = minutes;
+	st.attachments[i].task_total = minutes;
+	st.attachments[i].worker = c;
+	st.crew_list[c].job = st.JOB_WORK;
+	var b : text.Buf = undefined; text.clear(&b);
+	text.put(&b, st.crewName(c)); text.put(&b, " starts dismantling: "); text.put(&b, s.name);
+	st.say(text.view(&b));
+}
+
+// the dismantling itself, when the work is done
+fn finishDismantle(world : World, i : i32) : void {
+	const a = st.attachments[i];
+	const s = cfg.attachStats(cfg.attachKind(a.kind));
+	st.res.steel += (s.steel as f32) * cfg.ATTACH_REFUND;
+	st.res.electronics += (s.electronics as f32) * cfg.ATTACH_REFUND;
+	st.res.polymers += (s.polymers as f32) * cfg.ATTACH_REFUND;
+	st.res.parts += (s.parts as f32) * cfg.ATTACH_REFUND;
+	setRoofHidden(a.host, a.slot, a.kind, false);
+	world.destroyEntity(a.entity);
+	st.attach_count -= 1;
+	st.attachments[i] = st.attachments[st.attach_count];
+}
+
+// free slot the mouse ray passes closest to, like pickSocket; host and slot through the pointers, false if none is close enough
+fn pickSlot(mx : f32, my : f32, host : *i32, slot_index : *i32) : bool {
+	var o : Vec3 = undefined;
+	var dir : Vec3 = undefined;
+	host.* = -1;
+	slot_index.* = -1;
+	if not orbit.aimRay(mx, my, &o, &dir) { return false; }
+	var best_score : f32 = 1.0;
+	for m in 0..st.module_count {
+		const mod = st.modules[m];
+		for k in 0..defs.slotCount(mod.kind) {
+			if not slotFree(m, k) { continue; }
+			const p = mod.pos + defs.rotate(mod.rot, defs.slot(mod.kind, k).pos);
+			const rel = p - o;
+			const t = dot(rel, dir);
+			if t <= 0.0 { continue; }
+			const score = defs.dist(rel, dir * t) / (0.3 + 0.03 * t);
+			if score < best_score { best_score = score; host.* = m; slot_index.* = k; }
+		}
+	}
+	return host.* >= 0;
+}
+
+// attachment whose small bounding sphere the ray hits closer than max_t; -1 if none
+fn pickAttachment(mx : f32, my : f32, max_t : f32) : i32 {
+	var o : Vec3 = undefined;
+	var dir : Vec3 = undefined;
+	if not orbit.aimRay(mx, my, &o, &dir) { return -1; }
+	var best : i32 = -1;
+	var best_t = max_t;
+	for i in 0..st.attach_count {
+		const a = st.attachments[i];
+		const m = st.modules[a.host];
+		const c = m.pos + defs.rotate(m.rot, defs.slot(m.kind, a.slot).pos);
+		const t = dot(c - o, dir);
+		if t <= 0.0 or t >= best_t { continue; }
+		if defs.dist(c - o, dir * t) < 0.45 { best_t = t; best = i; }
+	}
+	return best;
+}
+
+// distance along the mouse ray to a module's centre (a big number if none): attachments in front of it are on its near side
+fn moduleHitDistance(mx : f32, my : f32, index : i32) : f32 {
+	var o : Vec3 = undefined;
+	var dir : Vec3 = undefined;
+	if index < 0 or not orbit.aimRay(mx, my, &o, &dir) { return 1000000.0; }
+	const m = st.modules[index];
+	const c = m.pos + defs.rotate(m.rot, defs.getDef(m.kind).center);
+	return dot(c - o, dir);
+}
+
+// ---- attachment ghost ----
+var g_aghost : ?Entity = null;
+var g_aghost_kind : i32 = 0;
+var g_aghost_central : bool = false;
+var g_aghost_ok : bool = false;
+
+fn clearAttachGhost(world : World) : void {
+	if const e = g_aghost { world.destroyEntity(e); }
+	g_aghost = null;
+	g_aghost_kind = 0;
+}
+
+fn updateAttachGhost(world : World) : void {
+	if st.build_attach <= 0 {
+		st.aim_host = -1;
+		st.aim_slot = -1;
+		if g_aghost_kind != 0 { clearAttachGhost(world); }
+		return;
+	}
+	var host : i32 = -1;
+	var slot_index : i32 = -1;
+	if not pickSlot(st.mouse_x, st.mouse_y, &host, &slot_index) {
+		st.aim_host = -1;
+		st.aim_slot = -1;
+		if g_aghost_kind != 0 { clearAttachGhost(world); }
+		g_ghost_why = "";
+		return;
+	}
+	st.aim_host = host;
+	st.aim_slot = slot_index;
+	g_ghost_why = checkAttach(st.build_attach, host, slot_index);
+	const ok = g_ghost_why.length == 0;
+	const central = st.modules[host].kind == .Central;
+	if g_aghost_kind != st.build_attach or g_aghost_central != central or g_aghost_ok != ok {
+		clearAttachGhost(world);
+		const e = world.createEntity();
+		e.setName("Ghost");
+		if const mi = e.createModelInstance() {
+			mi.setPath(gen.attachModel(st.build_attach, central));
+			mi.setMaterialOverride(0, ghostMaterial(ok));
+		}
+		g_aghost = e;
+		g_aghost_kind = st.build_attach;
+		g_aghost_central = central;
+		g_aghost_ok = ok;
+	}
+	if const e = g_aghost {
+		const m = st.modules[host];
+		var lp : Vec3 = undefined;
+		var lr : Quat = undefined;
+		attachLocal(host, slot_index, st.build_attach, st.build_roll, &lp, &lr);
+		// lifted a little so it does not z-fight with the roof piece it would replace
+		e.setPosition(flight.toWorld(m.pos + defs.rotate(m.rot, lp + defs.rotate(lr, Vec3 { 0, 0.01, 0 }))));
+		e.setRotation(flight.frameRotation() * m.rot * lr);
+	}
+}
+
+// ---- racks (inside modules) -------------------------------------------------------------------------------------------------------------
+
+fn racksIn(host : i32) : i32 {
+	var n : i32 = 0;
+	for i in 0..st.rack_count { if st.racks[i].host == host { n += 1; } }
+	return n;
+}
+
+fn rackUnlocked(s : cfg.RackStats) : bool {
+	return s.unlock == 0 or st.hasTech(s.unlock);
+}
+
+fn canAffordRack(s : cfg.RackStats) : bool {
+	return st.res.steel >= (s.steel as f32) and st.res.electronics >= (s.electronics as f32) and st.res.polymers >= (s.polymers as f32) and st.res.parts >= (s.parts as f32);
+}
+
+// "" if a rack of this kind fits into the module, otherwise why not
+fn checkRack(kind : i32, host : i32) : []const u8 {
+	if host < 0 or host >= st.module_count { return "Click a module with free rack slots."; }
+	const mk = st.modules[host].kind;
+	if defs.rackSlots(mk) == 0 { return "That module has no rack slots."; }
+	if racksIn(host) >= defs.rackSlots(mk) { return "No free rack slot in that module."; }
+	const s = cfg.rackStats(cfg.rackKind(kind));
+	if s.large_only and mk != .LargeHull { return "Needs a Large hull."; }
+	if not rackUnlocked(s) { return "Not researched yet."; }
+	if not canAffordRack(s) { return "Not enough materials."; }
+	return "";
+}
+
+// hull dressing theme: the theme most of the module's racks ask for (plain when empty)
+fn moduleTheme(host : i32) : i32 {
+	var counts : [8]i32 = undefined;
+	for t in 0..8 { counts[t] = 0; }
+	for i in 0..st.rack_count {
+		if st.racks[i].host == host { counts[cfg.rackStats(cfg.rackKind(st.racks[i].kind)).theme] += 1; }
+	}
+	var best : i32 = 0;
+	for t in 1..8 { if counts[t] > counts[best] { best = t; } }
+	return counts[best] > 0 ? best : 0;
+}
+
+// swaps a hull's plates for its current theme (same seed, same part list, only models change)
+fn redress(host : i32) : void {
+	const m = st.modules[host];
+	if m.kind == .Central or defs.rackSlots(m.kind) == 0 { return; }
+	const theme = moduleTheme(host);
+	if theme == m.theme { return; }
+	st.modules[host].theme = theme;
+	gen.generate(m.kind, m.seed, theme);
+	const n = gen.count < m.part_count ? gen.count : m.part_count;
+	for i in 0..n {
+		if const mi = st.parts[m.first_part + i].entity.modelInstance() {
+			mi.setPath(gen.parts[i].model);
+			mi.setEnabled(not gen.parts[i].hidden);
+		}
+	}
+}
+
+// no cost, no checks
+fn addRack(kind : i32, host : i32) : void {
+	if st.rack_count >= 256 { return; }
+	st.racks[st.rack_count] = st.RackInst { kind, host, 1.0, st.TASK_NONE, 0.0, 0.0, -1, -1, cfg.JOB_SORT, 0.0 };
+	st.rack_count += 1;
+	redress(host);
+}
+
+fn tryFitRack(kind : i32, host : i32) : []const u8 {
+	const why = checkRack(kind, host);
+	if why.length > 0 { return why; }
+	const c = st.takeCrew();
+	if c < 0 { return "Select an idle crew member first."; }
+	const s = cfg.rackStats(cfg.rackKind(kind));
+	st.res.steel -= s.steel as f32;
+	st.res.electronics -= s.electronics as f32;
+	st.res.polymers -= s.polymers as f32;
+	st.res.parts -= s.parts as f32;
+	addRack(kind, host);
+	const ri = st.rack_count - 1;
+	const minutes = workMinutes(kgOf(s.steel, s.electronics, s.polymers, s.parts));
+	st.racks[ri].task = st.TASK_BUILD;
+	st.racks[ri].task_left = minutes;
+	st.racks[ri].task_total = minutes;
+	st.racks[ri].worker = c;
+	st.crew_list[c].job = st.JOB_WORK;
+	var b : text.Buf = undefined; text.clear(&b);
+	text.put(&b, st.crewName(c)); text.put(&b, " starts fitting: "); text.put(&b, s.name); text.put(&b, " in "); text.put(&b, defs.getDef(st.modules[host].kind).name);
+	st.say(text.view(&b));
+	return "";
+}
+
+// "" if the rack can be taken out, otherwise why not (crew would lose beds, stock would lose its space)
+fn checkRemoveRack(i : i32) : []const u8 {
+	if i < 0 or i >= st.rack_count { return "No such rack."; }
+	const s = cfg.rackStats(cfg.rackKind(st.racks[i].kind));
+	const t = st.tot;
+	if s.crew > 0 and t.crew_cap - s.crew < st.crew { return "The crew would lose their beds."; }
+	if s.food_store > 0.0 and st.res.food > t.food_cap - s.food_store { return "The stored food would not fit elsewhere."; }
+	if s.mixed_store > 0.0 and st.res.mixed > t.mixed_cap - s.mixed_store { return "The salvage in the hold would not fit elsewhere."; }
+	return "";
+}
+
+fn removeRack(i : i32) : []const u8 {
+	const why = checkRemoveRack(i);
+	if why.length > 0 { st.say(why); return why; }
+	if st.racks[i].task != st.TASK_NONE { st.say("Someone is already working on that rack."); return "busy"; }
+	const c = st.takeCrew();
+	if c < 0 { return "no crew"; }
+	const s = cfg.rackStats(cfg.rackKind(st.racks[i].kind));
+	if st.racks[i].staff >= 0 { st.crew_list[st.racks[i].staff].job = st.JOB_IDLE; st.racks[i].staff = -1; }
+	const minutes = workMinutes(kgOf(s.steel, s.electronics, s.polymers, s.parts)) * cfg.DISMANTLE_FACTOR;
+	st.racks[i].task = st.TASK_DISMANTLE;
+	st.racks[i].task_left = minutes;
+	st.racks[i].task_total = minutes;
+	st.racks[i].worker = c;
+	st.crew_list[c].job = st.JOB_WORK;
+	var b : text.Buf = undefined; text.clear(&b);
+	text.put(&b, st.crewName(c)); text.put(&b, " starts removing: "); text.put(&b, s.name);
+	st.say(text.view(&b));
+	return "";
+}
+
+// the removal itself, when the work is done
+fn finishRemoveRack(i : i32) : void {
+	const r = st.racks[i];
+	const s = cfg.rackStats(cfg.rackKind(r.kind));
+	st.res.steel += (s.steel as f32) * cfg.ATTACH_REFUND;
+	st.res.electronics += (s.electronics as f32) * cfg.ATTACH_REFUND;
+	st.res.polymers += (s.polymers as f32) * cfg.ATTACH_REFUND;
+	st.res.parts += (s.parts as f32) * cfg.ATTACH_REFUND;
+	// keep the module's racks in fitting order (the panel lists them in order)
+	for k in i..(st.rack_count - 1) { st.racks[k] = st.racks[k + 1]; }
+	st.rack_count -= 1;
+	redress(r.host);
+}
+
+// index of the n-th rack (0-based) of a module, -1 if none
+fn rackOf(host : i32, n : i32) : i32 {
+	var k : i32 = 0;
+	for i in 0..st.rack_count {
+		if st.racks[i].host != host { continue; }
+		if k == n { return i; }
+		k += 1;
+	}
+	return -1;
+}
+
+// ---- crew work ------------------------------------------------------------------------------------------------------------------------------
+// Actions become tasks on the item they change (task, task_left, worker); updateWork advances them while their worker is on the job (at st.workSpeed: their stats) and
+// finishes them. Items being built show in the ghost material and do nothing until they are finished.
+
+fn workMinutes(kg : f32) : f32 {
+	const m = kg * cfg.WORK_MIN_PER_KG;
+	return m > cfg.WORK_MIN_MINUTES ? m : cfg.WORK_MIN_MINUTES;
+}
+
+fn kgOf(steel : i32, electronics : i32, polymers : i32, parts : i32) : f32 {
+	return (steel + electronics + polymers + parts) as f32;
+}
+
+fn setModuleGhost(m : st.ModuleInst, ghost : bool) : void {
+	for k in m.first_part..(m.first_part + m.part_count) {
+		if const mi = st.parts[k].entity.modelInstance() { mi.setMaterialOverride(0, ghost ? "gfx/ghost_ok.mat" : ""); }
+	}
+}
+
+fn setEntityGhost(e : Entity, ghost : bool) : void {
+	if const mi = e.modelInstance() { mi.setMaterialOverride(0, ghost ? "gfx/ghost_ok.mat" : ""); }
+}
+
+fn crewOn(c : i32, job : i32) : bool {
+	return c >= 0 and c < st.crew_slots and st.crew_list[c].alive and st.crew_list[c].job == job;
+}
+
+fn finishWorker(c : i32) : void {
+	if c >= 0 and c < st.crew_slots and st.crew_list[c].job == st.JOB_WORK { st.crew_list[c].job = st.JOB_IDLE; }
+}
+
+fn sayDone(what : []const u8, name : []const u8, c : i32) : void {
+	var b : text.Buf = undefined; text.clear(&b);
+	text.put(&b, what); text.put(&b, name);
+	if c >= 0 and c < st.crew_slots { text.put(&b, " ("); text.put(&b, st.crewName(c)); text.put(&b, ")"); }
+	st.say(text.view(&b));
+}
+
+// hp restored by a finished repair: the paid share of what is missing now, on the module and everything in and on it
+fn applyRepair(host : i32, share : f32) : void {
+	st.modules[host].hp += (1.0 - st.modules[host].hp) * share;
+	for i in 0..st.rack_count { if st.racks[i].host == host { st.racks[i].hp += (1.0 - st.racks[i].hp) * share; } }
+	for i in 0..st.attach_count { if st.attachments[i].host == host { st.attachments[i].hp += (1.0 - st.attachments[i].hp) * share; } }
+}
+
+fn updateWork(world : World, dt_min : f32) : void {
+	if dt_min <= 0.0 { return; }
+	for i in 0..st.module_count {
+		const m = st.modules[i];
+		if m.task == st.TASK_NONE or not crewOn(m.worker, st.JOB_WORK) { continue; }
+		st.modules[i].task_left -= dt_min * st.workSpeed(m.worker, m.task);   // the worker's stats
+		if st.modules[i].task_left > 0.0 { continue; }
+		const d = defs.getDef(m.kind);
+		if m.task == st.TASK_BUILD { setModuleGhost(m, false); sayDone("Finished building: ", d.name, m.worker); }
+		else if m.task == st.TASK_REPAIR { applyRepair(i, m.share); sayDone("Repaired: ", d.name, m.worker); }
+		else if m.task == st.TASK_SHIP { st.modules[i].ship = st.SHIP_DOCKED; sayDone("Shuttle ready at the ", d.name, m.worker); }
+		finishWorker(m.worker);
+		st.modules[i].task = st.TASK_NONE;
+		st.modules[i].worker = -1;
+	}
+	var i : i32 = 0;
+	while i < st.rack_count {
+		const r = st.racks[i];
+		if r.task == st.TASK_NONE or not crewOn(r.worker, st.JOB_WORK) { i += 1; continue; }
+		st.racks[i].task_left -= dt_min * st.workSpeed(r.worker, r.task);
+		if st.racks[i].task_left > 0.0 { i += 1; continue; }
+		const name = cfg.rackStats(cfg.rackKind(r.kind)).name;
+		finishWorker(r.worker);
+		st.racks[i].worker = -1;
+		st.racks[i].task = st.TASK_NONE;
+		if r.task == st.TASK_BUILD { redress(r.host); sayDone("Fitted: ", name, r.worker); i += 1; }
+		else if r.task == st.TASK_DISMANTLE {
+			const why = checkRemoveRack(i);
+			if why.length > 0 { st.say(why); i += 1; }
+			else { finishRemoveRack(i); sayDone("Removed: ", name, r.worker); }   // the next rack moved into index i
+		}
+		else { i += 1; }
+	}
+	i = 0;
+	while i < st.attach_count {
+		const a = st.attachments[i];
+		if a.task == st.TASK_NONE or not crewOn(a.worker, st.JOB_WORK) { i += 1; continue; }
+		st.attachments[i].task_left -= dt_min * st.workSpeed(a.worker, a.task);
+		if st.attachments[i].task_left > 0.0 { i += 1; continue; }
+		const name = cfg.attachStats(cfg.attachKind(a.kind)).name;
+		finishWorker(a.worker);
+		st.attachments[i].worker = -1;
+		st.attachments[i].task = st.TASK_NONE;
+		if a.task == st.TASK_BUILD { setEntityGhost(a.entity, false); setRoofHidden(a.host, a.slot, a.kind, true); sayDone("Fitted: ", name, a.worker); i += 1; }
+		else if a.task == st.TASK_REPAIR { st.attachments[i].hp = 1.0; sayDone("Repaired: ", name, a.worker); i += 1; }
+		else if a.task == st.TASK_DISMANTLE { finishDismantle(world, i); sayDone("Dismantled: ", name, a.worker); }   // the last one moved into i
+		else { i += 1; }
+	}
+	// repairing the whole station
+	if st.repair_all_left > 0.0 and crewOn(st.repair_all_worker, st.JOB_REPAIR_ALL) {
+		st.repair_all_left -= dt_min * st.workSpeed(st.repair_all_worker, st.TASK_REPAIR);
+		if st.repair_all_left <= 0.0 {
+			st.repair_all_left = 0.0;
+			for k in 0..st.module_count { applyRepair(k, st.repair_all_share); }
+			sayDone("Station repaired", "", st.repair_all_worker);
+			st.crew_list[st.repair_all_worker].job = st.JOB_IDLE;
+			st.repair_all_worker = -1;
+		}
+	}
+}
+
+// ---- shuttles ---------------------------------------------------------------------------------------------------------------------------------
+// A Docking Hub's last part is its shuttle (modgen.dockingHub): hidden while there is none or it is away, a ghost while it is being built
+var g_ship_shown : [48]i32 = undefined;   // per module: what its shuttle part shows (0 hidden, 1 shuttle, 2 ghost), -1 = unknown
+
+fn shipLook(m : st.ModuleInst) : i32 {
+	if m.task == st.TASK_SHIP { return 2; }
+	return m.ship == st.SHIP_DOCKED ? 1 : 0;
+}
+
+// call every frame; only touches a shuttle whose look changed
+fn syncShips() : void {
+	for i in 0..st.module_count {
+		const m = st.modules[i];
+		if m.kind != .DockingHub or m.task == st.TASK_BUILD { g_ship_shown[i] = -1; continue; }
+		const look = shipLook(m);
+		const was = g_ship_shown[i];
+		if was == look { continue; }
+		g_ship_shown[i] = look;
+		if const mi = st.parts[m.first_part + m.part_count - 1].entity.modelInstance() {
+			mi.setEnabled(look > 0);
+			// only into and out of the ghost look: an emptied override stays unresolved while the part is hidden
+			if look == 2 { mi.setMaterialOverride(0, "gfx/ghost_ok.mat"); }
+			else if was == 2 { mi.setMaterialOverride(0, ""); }
+		}
+	}
+}
+
+// clicking a module (or its attachment) with paused work puts a crew member on it: without one chosen yet it sets st.crew_wanted (the HUD asks who and calls again)
+fn resumeWork(host : i32, attach : i32) : bool {
+	var found = false;
+	if attach >= 0 {
+		found = st.attachments[attach].task != st.TASK_NONE and st.attachments[attach].worker < 0;
+	} else if host >= 0 {
+		found = st.modules[host].task != st.TASK_NONE and st.modules[host].worker < 0;
+		if not found {
+			for i in 0..st.rack_count {
+				if st.racks[i].host == host and st.racks[i].task != st.TASK_NONE and st.racks[i].worker < 0 { found = true; break; }
+			}
+		}
+	}
+	if not found { return false; }
+	const c = st.takeCrew();   // frees a bench they were staffing
+	if c < 0 { return false; }
+	if attach >= 0 { st.attachments[attach].worker = c; }
+	else if st.modules[host].task != st.TASK_NONE and st.modules[host].worker < 0 { st.modules[host].worker = c; }
+	else {
+		for i in 0..st.rack_count {
+			if st.racks[i].host == host and st.racks[i].task != st.TASK_NONE and st.racks[i].worker < 0 { st.racks[i].worker = c; break; }
+		}
+	}
+	st.crew_list[c].job = st.JOB_WORK;
+	sayDone("Back to work: ", st.crewName(c), -1);
+	return true;
+}
+
+// next workshop job for a bench; a batch in progress is abandoned (its inputs are lost)
+fn cycleJob(i : i32) : void {
+	if i < 0 or i >= st.rack_count or not cfg.rackStats(cfg.rackKind(st.racks[i].kind)).sorts { return; }
+	st.racks[i].job = (st.racks[i].job + 1) % cfg.WORKSHOP_JOBS;
+	st.racks[i].batch = 0.0;
+}
+
+// assigns the selected crew member to a workshop / research bench or an exercise machine, or frees it
+fn staffRack(i : i32) : void {
+	if i < 0 or i >= st.rack_count { return; }
+	const s = cfg.rackStats(cfg.rackKind(st.racks[i].kind));
+	if not s.sorts and s.research <= 0.0 and not s.exercise { st.say("Only benches and exercise machines take a crew member."); return; }
+	if st.racks[i].task == st.TASK_BUILD { st.say("That rack is not finished yet."); return; }
+	const job = s.exercise ? st.JOB_EXERCISE : st.JOB_BENCH;
+	const old = st.racks[i].staff;
+	if old >= 0 {
+		st.racks[i].staff = -1;
+		if old < st.crew_slots and st.crew_list[old].job == job { st.crew_list[old].job = st.JOB_IDLE; }
+		sayDone(s.exercise ? "Stopped exercising: " : "Left the bench: ", st.crewName(old), -1);
+		return;
+	}
+	const c = st.takeCrew();
+	if c < 0 { return; }
+	st.racks[i].staff = c;
+	st.crew_list[c].job = job;
+	var b : text.Buf = undefined; text.clear(&b);
+	text.put(&b, st.crewName(c)); text.put(&b, s.exercise ? " exercises on the " : " works at the "); text.put(&b, s.name);
+	st.say(text.view(&b));
+}

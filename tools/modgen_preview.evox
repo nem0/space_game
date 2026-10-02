@@ -1,0 +1,73 @@
+// Studio preview of scripts/modgen.evox: spawns one generated module in the editor world (no orbit frame, no game state).
+// Sent by tools/parts_demo.sh module ... (tools/gen_modules_preview.py fills in the $NAMES). Entities are named demo_part like the kit demos,
+// so any of the demo commands clears them again.
+import "core:world"
+import "core:entity"
+import "core:vec3"
+import "core:quat"
+import "core:dvec3"
+import "core:renderer/module"
+import "core:renderer/environment"
+import "core:renderer/point_light"
+import "core:renderer/model_instance"
+import "scripts/defs" as defs
+import "scripts/modgen" as gen
+
+fn clear(world : World, name : []const u8) : void {
+	for i in 0..3000 {
+		if const e = world.findByName(name) { e.destroy(); } else { return; }
+	}
+}
+
+fn fill(world : World, x : f32, y : f32, z : f32, cr : f32, cg : f32, cb : f32, intensity : f32) : void {
+	const e = world.createEntity();
+	e.setName("Demo fill");
+	e.setPosition(DVec3 { x as f64, y as f64, z as f64 });
+	if const l = e.createPointLight() {
+		l.setColor(Vec3 { cr, cg, cb });
+		l.setIntensity(intensity);
+		l.setRange(200.0);
+		l.setAttenuationParam(0.05);
+		l.setCastShadows(false);
+	}
+}
+
+fn lights(world : World) : void {
+	var r = world.renderer() else return;
+	const sun = world.createEntity();
+	sun.setName("Demo sun");
+	sun.setRotation(makeQuatFromYaw($SUN) * makeQuatFromPitch(-0.7));
+	if const env = sun.createEnvironment() {
+		env.setDirectIntensity(3.5);
+		env.setIndirectIntensity(0.6);
+		env.setSkyIntensity(0.0);
+		env.setSunlightStrength(1.0);
+		env.setAtmoEnabled(false);
+		env.setCastShadows(true);
+		r.setActiveEnvironment(sun);
+	}
+	sun.setPosition(DVec3 { 2.5, 30.0, 0.0 });
+	fill(world, 9.0, -40.0, 17.0, 0.45, 0.62, 1.0, 5.0);
+	fill(world, 34.0, 9.0, 14.0, 1.0, 0.95, 0.9, 0.8);
+}
+
+fn main(world : World) : void {
+	if $CLEAR {
+		clear(world, "Demo sun"); clear(world, "Demo fill"); clear(world, "demo_part");
+		lights(world);
+	}
+	const origin = Vec3 { $PX, $PY, $PZ };
+	const rot = makeQuatFromYaw($YAW) * Quat { 0.0, 0.0, $UPS, $UPC };	// --up turns the module so its +X points up (a wing on a top pad)
+	gen.generate(defs.kindFromIndex($KIND), $SEED);
+	for i in 0..gen.count {
+		const p = gen.parts[i];
+		const at = origin + defs.rotate(rot, p.pos);
+		const e = world.createEntity();
+		e.setName("demo_part");
+		e.setPosition(DVec3 { at.x as f64, at.y as f64, at.z as f64 });
+		e.setRotation(rot * p.rot);
+		if const mi = e.createModelInstance() {
+			mi.setPath(p.model);
+		}
+	}
+}

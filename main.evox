@@ -1,0 +1,113 @@
+// Still Above: Orbital Refuge - basic playable loop.
+//   * Start with one aging Central Module and two crew. Oxygen, food and power drain in real time (speed controls in the HUD).
+//   * Pick a module card, aim at a free docking port or panel mount and click to build it there.
+//   * Scavenge nearby scrap on EVA; a radar finds bigger contacts (debris, survivors, satellites, asteroids, settlers) to fly with a shuttle.
+//   * Goal: grow the crew with oxygen, food and power stable for days (numbers in scripts/config.evox).
+// Camera: right mouse drag = orbit, wheel = zoom, WASD = pan.   Keys: Space = pause, Z/X/C = speed 1x/3x/10x, B = reboost burn, R = turn the module being placed by 90 degrees.   Scripts live in scripts/*.evox, models in models/.
+import "core:world"
+import "core:log"
+import "core:engine/engine"
+import "core:input"
+import "core:core/keycode"
+import "core:core/mousebutton"
+
+import "scripts/state" as st
+import "scripts/sim" as sim
+import "scripts/build" as build
+import "scripts/orbit" as orbit
+import "scripts/station_orbit" as flight
+import "scripts/hud" as hud
+import "scripts/config" as cfg
+
+fn speedFactor() : f32 {
+	// game minutes per real second (nothing runs behind the main menu)
+	if st.menu { return 0.0; }
+	match st.speed {
+		case 0: return 0.0;
+		case 1: return cfg.SPEED_1X;
+		case 2: return cfg.SPEED_3X;
+		case: return cfg.SPEED_10X;
+	}
+	return cfg.SPEED_1X;
+}
+
+// Esc / right click: stop placing whatever is armed and clear the selection
+fn cancel() : void {
+	st.build_kind = 0;
+	st.build_attach = 0;
+	st.build_rack = 0;
+	st.selected_module = -1;
+	st.selected_attach = -1;
+}
+
+fn main(engine : Engine, world : World) : void {
+	logInfo("[game] main started");
+	const input = engine.input();
+	orbit.initScene(world);
+	build.startStation(world);
+	hud.init(world);
+	var shift = false;
+	var click_wait : i32 = 0;
+	var right_drag : f32 = -1.0;   // mouse travel since the right button went down; -1 = not held   // frames until a world click is resolved (the HUD reports its own presses a frame later)
+
+	while true {
+		var dt : f32 = yield;
+		if dt > cfg.MAX_FRAME_SECONDS { dt = cfg.MAX_FRAME_SECONDS; }
+
+		for event in input.getEvents() {
+			match event {
+				case KeyboardEvent:
+					orbit.onKey(event.keycode, event.down);
+					if event.keycode == .SHIFT { shift = event.down; }
+					if event.down and not event.is_repeat {
+						match event.keycode {
+							case .TAB: build.step(shift ? -1 : 1);
+							case .ESCAPE:
+								if st.menu { if st.game_started { st.menu = false; } }
+								else if st.build_kind == 0 and st.build_attach == 0 and st.build_rack == 0 and st.selected_module < 0 and st.selected_attach < 0 { st.menu = true; }
+								else { cancel(); }
+							case .SPACE: if not st.menu { st.speed = st.speed == 0 ? 1 : 0; }
+							case .Z: st.speed = 1;
+							case .X: st.speed = 2;
+							case .C: st.speed = 3;
+							case .B: sim.toggleBoost();
+							case .R: build.rotateArmed();
+							case:
+						}
+					}
+				case MouseButtonEvent:
+					orbit.onMouseButton(event.button, event.down);
+					// the cursor position comes from the mouse move events: button events from the engine do not carry a reliable one
+					if event.button == .LEFT and event.down { click_wait = 2; }
+					// right button: a drag orbits the camera, a click (barely moved) cancels like Esc
+					if event.button == .RIGHT {
+						if event.down { right_drag = 0.0; }
+						else { if right_drag >= 0.0 and right_drag < 6.0 { cancel(); } right_drag = -1.0; }
+					}
+				case AxisEvent:
+					if event.device_type == .MOUSE {
+						orbit.onMouseMove(event.x, event.y); st.mouse_x = event.x_abs; st.mouse_y = event.y_abs;
+						if right_drag >= 0.0 { right_drag += (event.x < 0.0 ? -event.x : event.x) + (event.y < 0.0 ? -event.y : event.y); }
+					}
+				case MouseWheelEvent:
+					orbit.onWheel(event.y);
+				case:
+			}
+		}
+
+		sim.update(dt * speedFactor());
+		if not st.over { build.updateWork(world, dt * speedFactor()); }
+		build.syncShips();
+		flight.updateModules();
+		orbit.update(dt);
+		build.ensureSelection();
+		hud.update(world, dt);
+		build.updateGhost(world);
+		build.updateAttachGhost(world);
+		if click_wait > 0 {
+			click_wait -= 1;
+			if hud.uiDown() { click_wait = 0; }
+			else if click_wait == 0 { hud.placeAimed(world); }
+		}
+	}
+}

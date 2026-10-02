@@ -31,5 +31,7 @@
 *.out
 *.app
 
-data/.lumix
 tmp
+.lumix
+*.log
+studio.ini

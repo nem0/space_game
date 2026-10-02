@@ -1,0 +1,5 @@
+shader "/gfx/sun.hlsl"
+backface_culling true
+layer "default"
+uniform "Sun color", { 1.000000, 0.900000, 0.700000, 1.000000 }
+uniform "Brightness", 50.000000

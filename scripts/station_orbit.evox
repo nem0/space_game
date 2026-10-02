@@ -1,0 +1,141 @@
+// Circular station orbit in a rotating local frame. Earth remains fixed in world space.
+// Construction/collision/socket coordinates stay local; only rendered poses move.
+import "core:vec3"
+import "core:dvec3"
+import "core:entity"
+import "core:quat" as quat
+import "scripts/defs" as defs
+import "scripts/state" as st
+import "scripts/config" as cfg
+
+const PERIOD_MINUTES : f32 = cfg.ORBIT_PERIOD_MINUTES;   // game minutes per revolution
+const TAU : f32 = 6.28318530718;
+const EARTH_CENTER : Vec3 = Vec3 { 0.0, -6600.0, -1800.0 };
+// The rendered Earth has radius 3000 world units, representing 6371 km.
+// Altitude is measured above its surface, not from its center.
+const EARTH_RADIUS_WORLD : f32 = 3000.0;
+const EARTH_RADIUS_KM : f32 = 6371.0;
+
+fn frameRotation() : quat.Quat {
+	// A rotation around X sweeps the initial radius through a complete circle.
+	// Deriving phase from the simulation clock automatically respects pause,
+	// time acceleration and station restart, without accumulating frame drift.
+	const phase = st.res.minutes * (TAU / PERIOD_MINUTES);
+	return quat.makeQuatFromPitch(-phase);
+}
+
+// Direction away from the planet in station-local coordinates: the orbiting frame turns with the station, so it never changes.
+fn stationUp() : Vec3 {
+	return normalizeSafe(-EARTH_CENTER);
+}
+
+fn earthPosition() : DVec3 {
+	return DVec3 { EARTH_CENTER.x as f64, EARTH_CENTER.y as f64, EARTH_CENTER.z as f64 };
+}
+
+fn toWorld(local : Vec3) : DVec3 {
+	const q = frameRotation();
+	const orbital_radius = EARTH_RADIUS_WORLD * (1.0 + st.res.altitude / EARTH_RADIUS_KM);   // the tracked altitude: the station visibly sinks as the orbit decays
+	const radius = defs.rotate(q, normalizeSafe(-EARTH_CENTER) * orbital_radius);
+	const offset = defs.rotate(q, local);
+	// Add small module/camera offsets in double precision, not to a float
+	// world position thousands of units from the origin.
+	return DVec3 {
+		(EARTH_CENTER.x as f64) + (radius.x as f64) + (offset.x as f64),
+		(EARTH_CENTER.y as f64) + (radius.y as f64) + (offset.y as f64),
+		(EARTH_CENTER.z as f64) + (radius.z as f64) + (offset.z as f64)
+	};
+}
+
+fn updateModules() : void {
+	const q = frameRotation();
+	for i in 0..st.module_count {
+		const m = st.modules[i];
+		const pose = modulePose(m);
+		const building = m.task == st.TASK_BUILD and m.task_total > 0.0;
+		const progress = building ? 1.0 - m.task_left / m.task_total : 1.0;
+		for k in m.first_part..(m.first_part + m.part_count) {
+			const p = st.parts[k];
+			var at = m.pos + defs.rotate(pose, p.pos);
+			var spin = quat.makeQuatFromYaw(0.0);
+			if building {
+				// a module under construction: its parts fly in from the sides of the screen, one after another, and settle into place
+				const n = k - m.first_part;
+				var t = (progress - 0.6 * (n as f32) / (m.part_count as f32)) / 0.4;
+				if t < 0.0 { t = 0.0; }
+				if t > 1.0 { t = 1.0; }
+				const left = 1.0 - t;
+				const rest = left * left * left;   // ease-out: fast at first, slows down while docking
+				var side : f32 = 1.0;
+				if n % 2 != 0 { side = -1.0; }
+				const lift = ((n % 3) as f32 - 1.0) * 0.3;
+				at = at + (st.cam_right * side + st.cam_up * lift) * (st.cam_dist * 1.8 * rest);
+				spin = quat.makeQuatFromYaw(rest * 5.0 * side);
+			}
+			p.entity.setPosition(toWorld(at));
+			p.entity.setRotation(q * spin * pose * p.rot);
+		}
+	}
+	for i in 0..st.attach_count {
+		const a = st.attachments[i];
+		const m = st.modules[a.host];
+		const pose = modulePose(m);
+		var lp : Vec3 = undefined;
+		var lr : quat.Quat = undefined;
+		defs.attachPose(m.kind, a.slot, a.kind, a.roll, &lp, &lr);
+		var at = m.pos + defs.rotate(pose, lp);
+		var spin = quat.makeQuatFromYaw(0.0);
+		if a.task == st.TASK_BUILD and a.task_total > 0.0 {
+			// an attachment being fitted flies in from the side of the screen like the parts of a module, see above
+			const left = a.task_left / a.task_total;
+			const rest = left * left * left;
+			var side : f32 = 1.0;
+			if i % 2 != 0 { side = -1.0; }
+			at = at + (st.cam_right * side + st.cam_up * 0.2) * (st.cam_dist * 1.8 * rest);
+			spin = quat.makeQuatFromYaw(rest * 5.0 * side);
+		}
+		a.entity.setPosition(toWorld(at));
+		a.entity.setRotation(q * spin * pose * lr);
+	}
+}
+
+// ---- wing tracking ----------------------------------------------------------------------------------------------------------------------
+// The sun is fixed in world space while the station frame rotates once per orbit, so in station-local coordinates the sun circles around X.
+// Lumix passes the sun to the shaders as the vector TOWARD the light: rotation * (0, 0, -1).
+fn sunRotation() : quat.Quat {
+	return quat.makeQuatFromYaw(-0.9) * quat.makeQuatFromPitch(-0.7);
+}
+
+fn conjugate(q : quat.Quat) : quat.Quat {
+	return quat.Quat { -q.x, -q.y, -q.z, q.w };
+}
+
+fn sunDirLocal() : Vec3 {
+	const world_dir = normalize(defs.rotate(sunRotation(), Vec3 { 0, 0, -1 }));
+	return defs.rotate(conjugate(frameRotation()), world_dir);
+}
+
+// true while the station is inside Earth's shadow cylinder (sun behind the planet): solar power is zero then
+fn inEclipse() : bool {
+	const radius = EARTH_RADIUS_WORLD * (1.0 + st.res.altitude / EARTH_RADIUS_KM);
+	const r = defs.rotate(frameRotation(), normalizeSafe(-EARTH_CENTER) * radius);   // station position relative to the planet's centre
+	const s = normalize(defs.rotate(sunRotation(), Vec3 { 0, 0, -1 }));            // toward the sun
+	const along = dot(r, s);
+	if along >= 0.0 { return false; }
+	return length(r - s * along) < EARTH_RADIUS_WORLD;
+}
+
+// Pose of a module in the station frame. Wings turn about their own axis (wing local +X): solar wings face the sun, radiators stay edge-on to it,
+// so the two are always a quarter turn apart. Both faces of a wing are equivalent, so the turn is never more than 90 degrees.
+fn modulePose(m : st.ModuleInst) : quat.Quat {
+	if m.kind != .SolarWing and m.kind != .RadiatorWing { return m.rot; }
+	const a = defs.rotate(m.rot, Vec3 { 1, 0, 0 });        // wing axis = away from the host
+	const n0 = defs.rotate(m.rot, Vec3 { 0, 1, 0 });       // panel normal in the mounted pose
+	const s = sunDirLocal();
+	const p = s - a * dot(s, a);                            // sun direction projected onto the plane the wing can turn in
+	if lengthSquared(p) < 0.0001 { return m.rot; }
+	var t = normalize(p);
+	if m.kind == .RadiatorWing { t = normalize(cross(a, t)); }
+	if dot(n0, t) < 0.0 { t = -t; }
+	return defs.fromTo(n0, t) * m.rot;
+}

@@ -1,0 +1,978 @@
+// Resource simulation: power, heat, oxygen, carbon dioxide, food, research, orbital decay and reboosts, crew survival, radar contacts and missions.
+// All tuning values are in scripts/config.evox.
+import "scripts/defs" as defs
+import "scripts/state" as st
+import "scripts/text" as text
+import "core:random" as rnd
+import "scripts/config" as cfg
+import "scripts/station_orbit" as flight
+import "scripts/objectives" as obj
+
+const O2_PER_CREW : f32 = cfg.O2_PER_CREW;      // L per game minute (hud.evox reads these)
+const FOOD_PER_CREW : f32 = cfg.FOOD_PER_CREW;  // per game day
+
+fn computeTotals() : void {
+	const shadow = flight.inEclipse();   // solar power is zero in the Earth shadow (the Central Module own 5 kW is not solar)
+	var t = st.Totals { 0.0, 0.0, 0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 0.0, false, 0.0, 0.0, 0.0, 0.0, 0.0, false, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, false, 0.0, 0.0, 0.0, false, false, false };
+	for i in 0..st.module_count {
+		if st.modules[i].task == st.TASK_BUILD { continue; }   // still being built
+		const d = defs.getDef(st.modules[i].kind);
+		const hp = st.modules[i].hp;   // production scales with condition; draw and capacities do not
+		if d.power > 0.0 { if not shadow { t.power_prod += d.power * hp; } } else if hp > 0.0 { t.power_cons -= d.power; }   // at 0 HP the module is offline: no draw either
+		t.crew_cap += d.crew;
+		t.o2_prod += d.o2 * hp;
+		t.food_prod += d.food * hp;
+		t.research += d.research * hp;
+		t.batt_cap += d.battery;
+		t.cooling += d.cooling * hp;
+		t.o2_cap += d.o2_store;
+		t.food_cap += d.food_store;
+		t.co2_scrub += d.co2_scrub * hp;
+		t.volume += d.volume;
+		t.fuel_cap += d.fuel_store;
+		t.mixed_cap += d.mixed_store;
+		t.mass += d.mass;
+		if st.modules[i].ship == st.SHIP_DOCKED { t.mass += cfg.SHIP_MASS; }
+	}
+	// racks: production scales with their HP, draw stops at 0 HP, capacities and mass always count
+	var benches : i32 = 0;
+	var workshops : i32 = 0;
+	for i in 0..st.rack_count {
+		const r = st.racks[i];
+		if r.task == st.TASK_BUILD or st.modules[r.host].task == st.TASK_BUILD { continue; }
+		const s = cfg.rackStats(cfg.rackKind(r.kind));
+		// benches only work with someone at them
+		const staffed = r.staff >= 0 and r.staff < st.crew_slots and st.crew_list[r.staff].alive and st.crew_list[r.staff].job == st.JOB_BENCH;
+		if r.hp > 0.0 { t.power_cons += s.power; }
+		t.crew_cap += s.crew;
+		t.o2_prod += s.o2 * r.hp;
+		t.food_prod += s.food * r.hp;
+		t.co2_scrub += s.co2_scrub * r.hp;
+		if staffed { t.research += s.research * r.hp * st.statOf(r.staff, cfg.STAT_INT); }   // the researcher's intelligence
+		t.batt_cap += s.battery;
+		t.food_cap += s.food_store;
+		t.mixed_cap += s.mixed_store;
+		t.mass += s.mass;
+		if s.sorts { workshops += 1; }
+		t.water_recovery += s.water_recovery * r.hp;
+		t.fuel_rate += s.fuel_rate * r.hp;
+		if s.medical and r.hp > 0.0 { t.medical = true; }
+		if s.sorts and r.hp > 0.0 and staffed and r.job == cfg.JOB_SORT { benches += 1; t.sort_rate += cfg.SORT_KG_PER_HOUR * r.hp * st.statOf(r.staff, cfg.STAT_STR); }
+	}
+	// the workshop benches sort while there is mixed salvage and someone to work them; each draws extra power while it sorts
+	// without any workshop bench the crew hand-sort in the Central Module
+	if st.res.mixed > 0.01 and st.crew > 0 {
+		if benches > 0 { t.sorting = true; t.power_cons += cfg.SORT_POWER_KW * (benches as f32); }
+		else if workshops == 0 { t.sorting = true; t.sort_rate = cfg.HAND_SORT_KG_PER_HOUR; t.power_cons += cfg.SORT_POWER_KW; }
+	}
+	if t.water_recovery > cfg.WATER_RECOVERY { t.water_recovery = cfg.WATER_RECOVERY; }
+	t.bay = t.medical and st.hasTech(23);
+	t.eclipse = shadow;
+	// attachments: production scales with their own HP, draw stops at 0 HP, capacities and mass always count
+	var antennas : i32 = 0;
+	var dishes : i32 = 0;
+	for i in 0..st.attach_count {
+		const a = st.attachments[i];
+		if a.task == st.TASK_BUILD or st.modules[a.host].task == st.TASK_BUILD { continue; }
+		const s = cfg.attachStats(cfg.attachKind(a.kind));
+		if s.power > 0.0 { if not shadow or s.always_on { t.power_prod += s.power * a.hp; } } else if a.hp > 0.0 { t.power_cons -= s.power; }
+		t.cooling += s.cooling * a.hp;
+		t.co2_scrub += s.co2_scrub * a.hp;
+		t.o2_cap += s.o2_store;
+		t.fuel_cap += s.fuel_store;
+		t.mixed_cap += s.mixed_store;
+		t.mass += s.mass;
+		if s.sort_bonus > 0.0 and hasBench(a.host) { t.sort_bonus += s.sort_bonus * a.hp; }
+		if s.contact_bonus > 0.0 and antennas < cfg.ANTENNA_MAX { antennas += 1; t.contact_bonus += s.contact_bonus * a.hp; }
+		if s.radar and a.hp > 0.0 { t.radar = true; }
+		if s.salvage_bonus > 0.0 and dishes < cfg.DISH_MAX { dishes += 1; t.salvage_bonus += s.salvage_bonus * a.hp; }
+	}
+	// technologies (scripts/config.evox TECH_*)
+	if st.hasTech(1) { t.co2_scrub *= cfg.TECH_CO2_SCRUB; }
+	if st.hasTech(2) { t.food_prod *= cfg.TECH_FOOD; }
+	if st.hasTech(3) { t.food_cap *= cfg.TECH_FOOD_STORE; }
+	if st.hasTech(4) { t.o2_prod *= cfg.TECH_O2; }
+	if st.hasTech(6) { t.cooling *= cfg.TECH_COOLING; }
+	if st.hasTech(7) { t.batt_cap *= cfg.TECH_BATTERY; }
+	if st.hasTech(8) { t.power_prod *= cfg.TECH_SOLAR; }
+	if st.hasTech(10) { t.power_cons *= cfg.TECH_POWER_USE; }
+	if st.hasTech(11) { t.sort_rate *= cfg.TECH_SORT; }
+	if st.hasTech(16) { t.o2_cap *= cfg.TECH_O2_STORE; }
+	if st.hasTech(20) { t.mass *= cfg.TECH_MASS; }
+	t.heat = t.power_cons * cfg.HEAT_PER_KW * (st.hasTech(9) ? cfg.TECH_HEAT : 1.0);
+	t.overheating = t.heat > t.cooling;
+	t.co2_ppm = co2Ppm(t.volume);
+	t.co2_efficiency = co2Efficiency(t.co2_ppm);
+	t.decay = decayRate(st.res.altitude) * (st.hasTech(19) ? cfg.TECH_DECAY : 1.0);
+	t.boost_fuel_per_km = cfg.BOOST_FUEL_KG_PER_KM_PER_T * t.mass * (st.hasTech(17) ? cfg.TECH_BOOST_FUEL : 1.0);
+	st.tot = t;
+}
+
+// km of altitude lost per game day: doubles every ALT_DECAY_DOUBLING_KM below the reference altitude (denser air)
+fn decayRate(altitude : f32) : f32 {
+	return cfg.ALT_DECAY_KM_PER_DAY * pow2((cfg.ALT_DECAY_REF_KM - altitude) / cfg.ALT_DECAY_DOUBLING_KM);
+}
+
+fn pow2(x : f32) : f32 {
+	// 2^x for the small range needed here: integer part by repeated doubling / halving, fraction by a cubic fit
+	var r : f32 = 1.0;
+	var v = x;
+	while v >= 1.0 { r *= 2.0; v -= 1.0; }
+	while v < 0.0 { r *= 0.5; v += 1.0; }
+	return r * (1.0 + v * (0.6958 + v * (0.2262 + v * 0.0780)));
+}
+
+// ---- repair ------------------------------------------------------------------------------------------------------------------------------
+
+// steel and polymers a full repair needs now: of every module (only = -1) or of one
+fn repairCost(steel : *f32, polymers : *f32) : void { repairCostOf(-1, steel, polymers); }
+
+fn repairCostOf(only : i32, steel : *f32, polymers : *f32) : void {
+	var missing : f32 = 0.0;   // tonne-fractions of HP to restore
+	for i in 0..st.module_count {
+		if only >= 0 and i != only { continue; }
+		missing += (1.0 - st.modules[i].hp) * defs.getDef(st.modules[i].kind).mass;
+	}
+	for i in 0..st.attach_count {
+		if only >= 0 and st.attachments[i].host != only { continue; }
+		missing += (1.0 - st.attachments[i].hp) * cfg.attachStats(cfg.attachKind(st.attachments[i].kind)).mass;
+	}
+	for i in 0..st.rack_count {
+		if only >= 0 and st.racks[i].host != only { continue; }
+		missing += (1.0 - st.racks[i].hp) * cfg.rackStats(cfg.rackKind(st.racks[i].kind)).mass;
+	}
+	steel.* = missing * cfg.REPAIR_STEEL_KG_PER_T;
+	polymers.* = missing * cfg.REPAIR_POLYMERS_KG_PER_T;
+}
+
+fn repairAll() : void { repair(-1); }
+
+// repairs every module (only = -1) or one; with too little material, each gets the same share of its missing HP
+fn repair(only : i32) : void {
+	if st.over { return; }
+	if only >= st.module_count { return; }
+	var steel : f32 = 0.0;
+	var polymers : f32 = 0.0;
+	repairCostOf(only, &steel, &polymers);
+	if steel < 0.5 and polymers < 0.5 { st.say(only >= 0 ? "That module is in full repair." : "Every module is in full repair."); return; }
+	if repairWithKits(only, steel) { return; }
+	var share : f32 = 1.0;
+	if steel > 0.0 and st.res.steel < steel { share = st.res.steel / steel; }
+	if polymers > 0.0 and st.res.polymers < polymers and st.res.polymers / polymers < share { share = st.res.polymers / polymers; }
+	if share <= 0.001 { st.say("No steel or polymers for repairs."); return; }
+	if only >= 0 and st.modules[only].task != st.TASK_NONE { st.say("Someone is already working on that module."); return; }
+	if only < 0 and st.repair_all_left > 0.0 { st.say("The station is already being repaired."); return; }
+	const c = st.takeCrew();
+	if c < 0 { return; }
+	st.res.steel -= steel * share;
+	st.res.polymers -= polymers * share;
+	var minutes = (steel + polymers) * share * cfg.REPAIR_MIN_PER_KG;
+	if minutes < cfg.WORK_MIN_MINUTES { minutes = cfg.WORK_MIN_MINUTES; }
+	if only >= 0 {
+		st.modules[only].task = st.TASK_REPAIR;
+		st.modules[only].task_left = minutes;
+		st.modules[only].task_total = minutes;
+		st.modules[only].worker = c;
+		st.modules[only].share = share;
+		st.crew_list[c].job = st.JOB_WORK;
+	} else {
+		st.repair_all_left = minutes;
+		st.repair_all_total = minutes;
+		st.repair_all_worker = c;
+		st.repair_all_share = share;
+		st.crew_list[c].job = st.JOB_REPAIR_ALL;
+	}
+	var b : text.Buf = undefined; text.clear(&b);
+	text.put(&b, st.crewName(c)); text.put(&b, share >= 0.999 ? " starts repairs (" : " starts a partial repair, not enough material (");
+	text.putInt(&b, (minutes / 60.0 + 0.5) as i32); text.put(&b, " h)");
+	st.say(text.view(&b));
+}
+
+// one attachment
+fn attachRepairCost(i : i32, steel : *f32, polymers : *f32) : void {
+	const missing = (1.0 - st.attachments[i].hp) * cfg.attachStats(cfg.attachKind(st.attachments[i].kind)).mass;
+	steel.* = missing * cfg.REPAIR_STEEL_KG_PER_T;
+	polymers.* = missing * cfg.REPAIR_POLYMERS_KG_PER_T;
+}
+
+fn repairAttachment(i : i32) : void {
+	if st.over or i < 0 or i >= st.attach_count { return; }
+	var steel : f32 = 0.0;
+	var polymers : f32 = 0.0;
+	attachRepairCost(i, &steel, &polymers);
+	if steel < 0.05 and polymers < 0.05 { st.say("That attachment is in full repair."); return; }
+	if st.res.steel < steel or st.res.polymers < polymers { st.say("Not enough steel or polymers for that repair."); return; }
+	if st.attachments[i].task != st.TASK_NONE { st.say("Someone is already working on that attachment."); return; }
+	const c = st.takeCrew();
+	if c < 0 { return; }
+	st.res.steel -= steel;
+	st.res.polymers -= polymers;
+	var minutes = (steel + polymers) * cfg.REPAIR_MIN_PER_KG;
+	if minutes < cfg.WORK_MIN_MINUTES { minutes = cfg.WORK_MIN_MINUTES; }
+	st.attachments[i].task = st.TASK_REPAIR;
+	st.attachments[i].task_left = minutes;
+	st.attachments[i].task_total = minutes;
+	st.attachments[i].worker = c;
+	st.crew_list[c].job = st.JOB_WORK;
+	var b : text.Buf = undefined; text.clear(&b);
+	text.put(&b, st.crewName(c)); text.put(&b, " starts repairing: "); text.put(&b, cfg.attachStats(cfg.attachKind(st.attachments[i].kind)).name);
+	st.say(text.view(&b));
+}
+
+// repair kits needed for a repair whose material bill has `steel` kg of steel
+fn kitsFor(steel : f32) : f32 {
+	const tonnes = steel / cfg.REPAIR_STEEL_KG_PER_T;
+	var n = tonnes / cfg.KIT_TONNES;
+	const whole = n as i32;
+	if (whole as f32) < n { n = (whole + 1) as f32; }
+	return n < 1.0 ? 1.0 : n;
+}
+
+// with enough kits in stock, a repair uses them instead of steel and polymers and takes KIT_REPAIR_MINUTES
+fn repairWithKits(only : i32, steel : f32) : bool {
+	const need = kitsFor(steel);
+	if st.res.kits < need { return false; }
+	if only >= 0 and st.modules[only].task != st.TASK_NONE { st.say("Someone is already working on that module."); return true; }
+	if only < 0 and st.repair_all_left > 0.0 { st.say("The station is already being repaired."); return true; }
+	const c = st.takeCrew();
+	if c < 0 { return true; }
+	st.res.kits -= need;
+	if only >= 0 {
+		st.modules[only].task = st.TASK_REPAIR;
+		st.modules[only].task_left = cfg.KIT_REPAIR_MINUTES;
+		st.modules[only].task_total = cfg.KIT_REPAIR_MINUTES;
+		st.modules[only].worker = c;
+		st.modules[only].share = 1.0;
+		st.crew_list[c].job = st.JOB_WORK;
+	} else {
+		st.repair_all_left = cfg.KIT_REPAIR_MINUTES;
+		st.repair_all_total = cfg.KIT_REPAIR_MINUTES;
+		st.repair_all_worker = c;
+		st.repair_all_share = 1.0;
+		st.crew_list[c].job = st.JOB_REPAIR_ALL;
+	}
+	var b : text.Buf = undefined; text.clear(&b);
+	text.put(&b, st.crewName(c)); text.put(&b, " repairs with "); text.putInt(&b, need as i32); text.put(&b, " repair kit(s)");
+	st.say(text.view(&b));
+	return true;
+}
+
+// lowest HP of any module and its index (-1 when there are none)
+fn worstModule(hp : *f32) : i32 {
+	var worst : i32 = -1;
+	hp.* = 1.0;
+	for i in 0..st.module_count { if st.modules[i].hp < hp.* { hp.* = st.modules[i].hp; worst = i; } }
+	return worst;
+}
+
+// mass-weighted condition of the whole station, 0..1
+fn stationCondition() : f32 {
+	var sum : f32 = 0.0;
+	var mass : f32 = 0.0;
+	for i in 0..st.module_count { const m = defs.getDef(st.modules[i].kind).mass; sum += st.modules[i].hp * m; mass += m; }
+	return mass > 0.0 ? sum / mass : 1.0;
+}
+
+// ---- reboost -----------------------------------------------------------------------------------------------------------------------------
+
+fn toggleBoost() : void {
+	if st.over { return; }
+	if st.boosting { stopBoost(); st.say("Reboost burn stopped."); return; }
+	if st.res.fuel < 1.0 { st.say("No propellant for a reboost - bring some back from scrap, debris or asteroid missions."); return; }
+	if st.res.altitude >= cfg.BOOST_TARGET_KM - 0.5 { st.say("Already at the reboost target altitude."); return; }
+	const c = st.takeCrew();
+	if c < 0 { return; }
+	st.boost_worker = c;
+	st.crew_list[c].job = st.JOB_BOOST;
+	st.boosting = true;
+	var b : text.Buf = undefined; text.clear(&b);
+	text.put(&b, st.crewName(c)); text.put(&b, " starts a reboost burn.");
+	st.say(text.view(&b));
+}
+
+fn stopBoost() : void {
+	st.boosting = false;
+	const w = st.boost_worker;
+	if w >= 0 and w < st.crew_slots and st.crew_list[w].job == st.JOB_BOOST { st.crew_list[w].job = st.JOB_IDLE; }
+	st.boost_worker = -1;
+}
+
+fn died(c : i32, how : []const u8) : void {
+	var b : text.Buf = undefined; text.clear(&b);
+	if c >= 0 { text.put(&b, st.crewName(c)); } else { text.put(&b, "A crew member"); }
+	text.put(&b, how);
+	st.say(text.view(&b));
+}
+
+// litres of CO2 in the cabin air -> ppm of the pressurised volume (m3 = 1000 L)
+fn co2Ppm(volume : f32) : f32 {
+	if volume <= 0.0 { return 0.0; }
+	return st.res.co2 / (volume * 1000.0) * 1000000.0;
+}
+
+fn co2Litres(ppm : f32, volume : f32) : f32 {
+	return ppm / 1000000.0 * volume * 1000.0;
+}
+
+// output multiplier from CO2 headaches: 1 up to the warning level, falling linearly to CO2_BAD_EFFICIENCY at the bad level
+fn co2Efficiency(ppm : f32) : f32 {
+	const f = clampf((ppm - cfg.CO2_WARN_PPM) / (cfg.CO2_BAD_PPM - cfg.CO2_WARN_PPM), 0.0, 1.0);
+	return 1.0 - f * (1.0 - cfg.CO2_BAD_EFFICIENCY);
+}
+
+// does the module have a workshop bench (work lights count only there)
+fn hasBench(host : i32) : bool {
+	for i in 0..st.rack_count {
+		if st.racks[i].host == host and cfg.rackStats(cfg.rackKind(st.racks[i].kind)).sorts { return true; }
+	}
+	return false;
+}
+
+fn clampf(v : f32, lo : f32, hi : f32) : f32 {
+	if v < lo { return lo; }
+	if v > hi { return hi; }
+	return v;
+}
+
+// research points from the benches: into the selected technology, or banked when none is selected
+fn addResearch(rp : f32) : void {
+	if st.tech_active <= 0 { st.res.rp += rp; return; }
+	st.tech_prog[st.tech_active] += rp;
+	checkTech();
+}
+
+fn checkTech() : void {
+	const id = st.tech_active;
+	if id <= 0 { return; }
+	const t = cfg.techStats(id);
+	if st.tech_prog[id] < (t.cost as f32) { return; }
+	st.tech_done[id] = true;
+	st.tech_active = 0;
+	st.res.rp += st.tech_prog[id] - (t.cost as f32);   // overflow is banked for the next one
+	st.tech_prog[id] = (t.cost as f32);
+	var b : text.Buf = undefined; text.clear(&b);
+	text.put(&b, "Researched: "); text.put(&b, t.name); text.put(&b, ". Pick the next technology (RESEARCH).");
+	st.say(text.view(&b));
+}
+
+// click on a technology: start researching it (banked points go in), click again to stop, or a hint when a prerequisite is missing
+fn selectTech(id : i32) : void {
+	if st.over or id < 1 or id > cfg.TECH_COUNT { return; }
+	const state = st.techState(id);
+	if state == 3 { return; }
+	if state == 2 { st.tech_active = 0; return; }
+	const t = cfg.techStats(id);
+	if state == 0 {
+		var b : text.Buf = undefined; text.clear(&b);
+		const need = (t.req_a > 0 and not st.tech_done[t.req_a]) ? t.req_a : t.req_b;
+		text.put(&b, t.name); text.put(&b, " needs "); text.put(&b, cfg.techStats(need).name); text.put(&b, " first.");
+		st.say(text.view(&b));
+		return;
+	}
+	st.tech_active = id;
+	st.tech_prog[id] += st.res.rp;
+	st.res.rp = 0.0;
+	checkTech();
+}
+
+fn update(dt_min : f32) : void {
+	if st.over or dt_min <= 0.0 { return; }
+	computeTotals();
+	var t = st.tot;
+
+	// power: surplus charges the batteries, a deficit drains them; when they are empty every consumer is browned out
+	var ratio : f32 = 1.0;
+	if t.power_prod >= t.power_cons {
+		st.res.battery = clampf(st.res.battery + (t.power_prod - t.power_cons) * dt_min / 60.0, 0.0, t.batt_cap);
+	} else {
+		const draw = (t.power_cons - t.power_prod) * dt_min / 60.0;
+		if st.res.battery >= draw { st.res.battery -= draw; }
+		else { st.res.battery = 0.0; ratio = t.power_prod / t.power_cons; }
+	}
+	st.res.battery = clampf(st.res.battery, 0.0, t.batt_cap);
+	t.power_ratio = ratio;
+	// machines (scrubbers included) run at the power / cooling efficiency; everything else also suffers from the crew's CO2 headaches
+	const machines = ratio * (t.overheating ? cfg.OVERHEAT_EFFICIENCY : 1.0);
+	t.efficiency = machines * t.co2_efficiency;
+	st.tot = t;
+	// nights: an eclipse passed with a battery bank and no brownout counts for the objectives
+	if t.eclipse {
+		if not st.in_eclipse { st.in_eclipse = true; st.eclipse_ok = true; }
+		if ratio < 0.999 { st.eclipse_ok = false; }
+	} else if st.in_eclipse {
+		st.in_eclipse = false;
+		if st.eclipse_ok and t.batt_cap > 0.0 { st.nights_ok += 1; st.say("The station got through the night on its batteries."); }
+	}
+
+	// orbit: drag lowers it, a running reboost burn raises it and burns propellant in proportion to the station mass
+	if st.boosting and st.boost_worker < 0 { stopBoost(); st.say("Reboost stopped: nobody at the controls."); }
+	if st.boosting {
+		var km = cfg.BOOST_KM_PER_HOUR * dt_min / 60.0;
+		const to_target = cfg.BOOST_TARGET_KM - st.res.altitude;
+		if km > to_target { km = to_target; }
+		if t.boost_fuel_per_km > 0.0 and km * t.boost_fuel_per_km > st.res.fuel { km = st.res.fuel / t.boost_fuel_per_km; }
+		if km < 0.0 { km = 0.0; }
+		st.res.altitude += km;
+		st.res.fuel = clampf(st.res.fuel - km * t.boost_fuel_per_km, 0.0, t.fuel_cap);
+		if st.res.altitude >= cfg.BOOST_TARGET_KM - 0.01 { stopBoost(); st.say("Reboost complete."); }
+		else if st.res.fuel <= 0.01 { stopBoost(); st.say("Reboost stopped: out of propellant."); }
+	}
+	st.res.altitude = clampf(st.res.altitude - t.decay * dt_min / cfg.MINUTES_PER_DAY, 0.0, cfg.ALT_MAX_KM);
+	if st.res.altitude <= cfg.ALT_REENTRY_KM {
+		st.over = true; st.reentered = true; st.boosting = false;
+		st.say("The orbit decayed: the station re-entered the atmosphere and burned up.");
+		return;
+	}
+
+	// carbon dioxide: the crew exhale it, scrubbers and plants remove it, never below the background level
+	if not st.co2_started { st.co2_started = true; st.res.co2 = co2Litres(cfg.CO2_BACKGROUND_PPM, t.volume); }
+	const co2_floor = co2Litres(cfg.CO2_BACKGROUND_PPM, t.volume);
+	const co2_after = st.res.co2 + ((st.crew as f32) * cfg.CO2_PER_CREW - t.co2_scrub * machines) * dt_min;
+	st.res.co2 = co2_after > co2_floor ? co2_after : co2_floor;   // never below background: a new module brings air at the background level
+
+	st.res.minutes += dt_min;
+	// wear
+	const wear = cfg.HP_DECAY_PER_DAY * dt_min / cfg.MINUTES_PER_DAY;
+	// what is being repaired right now (a crew member on it) does not wear: one module and the racks in it, one attachment, or the whole station
+	const all_repair = st.repair_all_left > 0.0 and st.repair_all_worker >= 0;
+	for i in 0..st.module_count {
+		const m = st.modules[i];
+		if all_repair or (m.task == st.TASK_REPAIR and m.worker >= 0) { continue; }
+		st.modules[i].hp = clampf(m.hp - wear, 0.0, 1.0);
+	}
+	for i in 0..st.attach_count {
+		const a = st.attachments[i];
+		if all_repair or (a.task == st.TASK_REPAIR and a.worker >= 0) { continue; }
+		st.attachments[i].hp = clampf(a.hp - wear, 0.0, 1.0);
+	}
+	for i in 0..st.rack_count {
+		const r = st.racks[i];
+		const host = st.modules[r.host];
+		if all_repair or (host.task == st.TASK_REPAIR and host.worker >= 0) { continue; }
+		st.racks[i].hp = clampf(r.hp - wear, 0.0, 1.0);
+	}
+	st.res.o2 = clampf(st.res.o2 + (t.o2_prod * t.efficiency - (st.crew as f32) * O2_PER_CREW) * dt_min, 0.0, t.o2_cap);
+	st.res.food = clampf(st.res.food + (t.food_prod * t.efficiency - (st.crew as f32) * FOOD_PER_CREW) * dt_min / cfg.MINUTES_PER_DAY, 0.0, t.food_cap);
+	addResearch(t.research * t.efficiency * dt_min / 60.0);
+
+	// water: the crew use it, recyclers give a share back, fuel producers turn it into propellant
+	const water_use = (st.crew as f32) * cfg.WATER_PER_CREW * dt_min / cfg.MINUTES_PER_DAY;
+	st.res.water = clampf(st.res.water - water_use * (1.0 - t.water_recovery), 0.0, cfg.WATER_CAP);
+	if t.fuel_rate > 0.0 and st.res.water > 0.0 {
+		var kg = t.fuel_rate * t.efficiency * dt_min / cfg.MINUTES_PER_DAY;
+		if kg > t.fuel_cap - st.res.fuel { kg = t.fuel_cap - st.res.fuel; }
+		if kg * cfg.FUEL_PRODUCER_WATER_PER_KG > st.res.water { kg = st.res.water / cfg.FUEL_PRODUCER_WATER_PER_KG; }
+		if kg > 0.0 { st.res.water -= kg * cfg.FUEL_PRODUCER_WATER_PER_KG; st.res.fuel += kg; st.fuel_made += kg; }
+	}
+
+	// sorting: mixed salvage -> materials, the rest is waste
+	if t.sorting {
+		var kg = t.sort_rate * (1.0 + t.sort_bonus) * t.efficiency * dt_min / 60.0;
+		if kg > st.res.mixed { kg = st.res.mixed; }
+		st.res.mixed -= kg;
+		st.res.steel += kg * cfg.SORT_STEEL;
+		st.res.polymers += kg * cfg.SORT_POLYMERS;
+		st.res.electronics += kg * cfg.SORT_ELECTRONICS;
+		st.res.parts += kg * cfg.SORT_PARTS;
+		if st.res.mixed <= 0.01 { st.res.mixed = 0.0; st.say("All salvage sorted."); }
+	}
+
+	// workshop batches: parts, repair kits and mining drills
+	for i in 0..st.rack_count {
+		const r = st.racks[i];
+		if r.job == cfg.JOB_SORT or r.task == st.TASK_BUILD or r.hp <= 0.0 { continue; }
+		if not cfg.rackStats(cfg.rackKind(r.kind)).sorts { continue; }
+		if r.staff < 0 or r.staff >= st.crew_slots or st.crew_list[r.staff].job != st.JOB_BENCH { continue; }
+		if r.batch <= 0.0 {
+			// start a batch if the inputs are there
+			if r.job == cfg.JOB_PARTS {
+				if st.res.steel < cfg.PARTS_STEEL or st.res.polymers < cfg.PARTS_POLYMERS or st.res.electronics < cfg.PARTS_ELECTRONICS { continue; }
+				st.res.steel -= cfg.PARTS_STEEL; st.res.polymers -= cfg.PARTS_POLYMERS; st.res.electronics -= cfg.PARTS_ELECTRONICS;
+				st.racks[i].batch = cfg.PARTS_MINUTES;
+			} else if r.job == cfg.JOB_DRILLS {
+				if st.res.steel < cfg.DRILL_STEEL or st.res.parts < cfg.DRILL_PARTS { continue; }
+				st.res.steel -= cfg.DRILL_STEEL; st.res.parts -= cfg.DRILL_PARTS;
+				st.racks[i].batch = cfg.DRILL_MINUTES;
+			} else {
+				if st.res.steel < cfg.KIT_STEEL or st.res.polymers < cfg.KIT_POLYMERS { continue; }
+				st.res.steel -= cfg.KIT_STEEL; st.res.polymers -= cfg.KIT_POLYMERS;
+				st.racks[i].batch = cfg.KIT_MINUTES;
+			}
+		}
+		st.racks[i].batch -= dt_min * t.efficiency * r.hp * st.statOf(r.staff, cfg.STAT_INT);
+		if st.racks[i].batch <= 0.0 {
+			st.racks[i].batch = 0.0;
+			if r.job == cfg.JOB_PARTS { st.res.parts += cfg.PARTS_OUT; } else if r.job == cfg.JOB_DRILLS { st.res.drills += 1.0; } else { st.res.kits += 1.0; }
+		}
+	}
+
+	updateFitness(dt_min);
+	updateInjuries(dt_min);
+
+	// survival
+	if st.res.o2 <= 0.01 and st.crew > 0 {
+		st.o2_timer += dt_min;
+		if st.o2_timer >= cfg.SUFFOCATE_MINUTES { st.o2_timer = 0.0; died(st.killCrew(), " suffocated. Restore life support!"); }
+	} else { st.o2_timer = 0.0; }
+	if st.res.food <= 0.01 and st.crew > 0 {
+		st.food_timer += dt_min;
+		if st.food_timer >= cfg.STARVE_MINUTES { st.food_timer = 0.0; died(st.killCrew(), " starved."); }
+	} else { st.food_timer = 0.0; }
+	if st.res.water <= 0.01 and st.crew > 0 {
+		st.water_timer += dt_min;
+		if st.water_timer >= cfg.WATER_DEATH_MINUTES { st.water_timer = 0.0; died(st.killCrew(), " died of thirst."); }
+	} else { st.water_timer = 0.0; }
+	if co2Ppm(t.volume) >= cfg.CO2_LETHAL_PPM and st.crew > 0 {
+		st.co2_timer += dt_min;
+		if st.co2_timer >= cfg.CO2_DEATH_MINUTES { st.co2_timer = 0.0; died(st.killCrew(), " died of CO2 poisoning. Build scrubbers or plants!"); }
+	} else { st.co2_timer = 0.0; }
+	if st.crew <= 0 { st.over = true; st.say("All crew lost. The station falls silent."); return; }
+
+	// objective: enough crew and enough stable days (oxygen, food and power all sustained, CO2 below the warning level)
+	const o2_net = t.o2_prod * t.efficiency - (st.crew as f32) * O2_PER_CREW;
+	const food_net = t.food_prod * t.efficiency - (st.crew as f32) * FOOD_PER_CREW;
+	if o2_net >= 0.0 and food_net >= 0.0 and ratio >= 0.999 and co2Ppm(t.volume) < cfg.CO2_WARN_PPM { st.stable_days += dt_min / cfg.MINUTES_PER_DAY; } else { st.stable_days = 0.0; }
+	if not st.won and st.crew >= cfg.WIN_CREW and st.stable_days >= cfg.WIN_STABLE_DAYS {
+		st.won = true;
+		st.say("Foothold established: the station sustains a growing crew. You win - keep building!");
+	}
+
+	updateMissions(dt_min);
+	updateContacts(dt_min);
+	updateObjectives();
+}
+
+// ---- objectives -------------------------------------------------------------------------------------------------------------------------------
+
+// activates objectives whose trigger holds and completes the ones whose condition holds, paying the RP once (scripts/objectives.evox)
+fn updateObjectives() : void {
+	for id in 1..(obj.OBJ_COUNT + 1) {
+		if st.obj_done[id] { continue; }
+		if not st.obj_trig[id] {
+			if not obj.trigger(id) { continue; }
+			st.obj_trig[id] = true;
+			if st.res.minutes > 5.0 {
+				var b : text.Buf = undefined; text.clear(&b);
+				text.put(&b, "New objective: "); text.put(&b, obj.title(id));
+				st.say(text.view(&b));
+			}
+		}
+		if not obj.complete(id) { continue; }
+		st.obj_done[id] = true;
+		var b : text.Buf = undefined; text.clear(&b);
+		text.put(&b, "Objective done: "); text.put(&b, obj.title(id)); text.put(&b, " - claim it in OBJECTIVES");
+		st.say(text.view(&b));
+	}
+}
+
+// pays the reward of a done objective, once
+fn claimObjective(id : i32) : void {
+	if id < 1 or id > obj.OBJ_COUNT or not obj.unclaimed(id) { return; }
+	st.obj_claimed[id] = true;
+	const rp = obj.reward(id);
+	var b : text.Buf = undefined; text.clear(&b);
+	text.put(&b, "Claimed: "); text.put(&b, obj.title(id));
+	if rp > 0.0 { addResearch(rp); text.put(&b, " (+"); text.putInt(&b, rp as i32); text.put(&b, " RP)"); }
+	st.say(text.view(&b));
+}
+
+// ---- injuries ---------------------------------------------------------------------------------------------------------------------------------
+
+// crew member c gets hurt (nothing happens to the dead or the already hurt)
+fn hurt(c : i32, serious : bool) : void {
+	if c < 0 or c >= st.crew_slots or not st.crew_list[c].alive or st.crew_list[c].injury != st.INJURY_NONE { return; }
+	st.injuries_total += 1;
+	var b : text.Buf = undefined; text.clear(&b);
+	text.put(&b, st.crewName(c));
+	if serious {
+		st.serious_total += 1;
+		st.releaseCrew(c);
+		st.crew_list[c].job = st.JOB_HURT;
+		st.crew_list[c].injury = st.INJURY_SERIOUS;
+		st.crew_list[c].injury_left = cfg.INJURY_SERIOUS_CARE_MINUTES;
+		st.crew_list[c].doom = cfg.INJURY_SERIOUS_DOOM_MINUTES;
+		if st.selected_crew == c { st.selected_crew = -1; }
+		text.put(&b, " is badly hurt and cannot work.");
+	} else {
+		st.crew_list[c].injury = st.INJURY_MINOR;
+		st.crew_list[c].injury_left = cfg.INJURY_MINOR_MINUTES;
+		text.put(&b, " is hurt and works slower.");
+	}
+	st.say(text.view(&b));
+}
+
+// a mission or EVA is over: its crew member may come back hurt
+fn hurtAfterMission(c : i32, failed : bool) : void {
+	if c < 0 { return; }
+	const chance = failed ? cfg.INJURY_MISSION_FAIL_CHANCE : cfg.INJURY_MISSION_CHANCE;
+	if rnd.randFloatRange(0.0, 1.0) < chance { hurt(c, rnd.randFloatRange(0.0, 1.0) < cfg.INJURY_SERIOUS_SHARE); }
+}
+
+// random injuries, healing (a working medical rack makes it fast) and the nursing of the seriously hurt
+fn updateInjuries(dt_min : f32) : void {
+	const t = st.tot;
+	// caregivers whose patient is gone go back to being idle
+	for k in 0..st.crew_slots {
+		if st.crew_list[k].job != st.JOB_CARE { continue; }
+		const p = st.crew_list[k].care;
+		if not st.crew_list[k].alive or p < 0 or p >= st.crew_slots or not st.crew_list[p].alive or st.crew_list[p].injury != st.INJURY_SERIOUS { st.releaseCrew(k); }
+	}
+	const roll = cfg.INJURY_PER_CREW_PER_DAY * dt_min / cfg.MINUTES_PER_DAY;
+	for c in 0..st.crew_slots {
+		if not st.crew_list[c].alive { continue; }
+		const inj = st.crew_list[c].injury;
+		if inj == st.INJURY_NONE {
+			if st.crew_list[c].job != st.JOB_MISSION and rnd.randFloatRange(0.0, 1.0) < roll { hurt(c, rnd.randFloatRange(0.0, 1.0) < cfg.INJURY_SERIOUS_SHARE); }
+			continue;
+		}
+		if inj == st.INJURY_MINOR {
+			st.crew_list[c].injury_left -= dt_min * (t.medical ? cfg.INJURY_TREATED_RATE : cfg.INJURY_NATURAL_RATE);
+			if st.crew_list[c].injury_left <= 0.0 {
+				st.crew_list[c].injury = st.INJURY_NONE;
+				if t.medical { st.treated += 1; }
+				var b : text.Buf = undefined; text.clear(&b);
+				text.put(&b, st.crewName(c)); text.put(&b, " has recovered.");
+				st.say(text.view(&b));
+			}
+			continue;
+		}
+		// seriously hurt: needs a bay and a caregiver, or the clock runs out
+		var cared = false;
+		if t.bay {
+			var cg : i32 = -1;
+			for k in 0..st.crew_slots { if st.crew_list[k].alive and st.crew_list[k].job == st.JOB_CARE and st.crew_list[k].care == c { cg = k; break; } }
+			if cg < 0 {
+				for k in 0..st.crew_slots {
+					if k != c and st.crew_list[k].alive and st.crew_list[k].job == st.JOB_IDLE and st.crew_list[k].injury != st.INJURY_SERIOUS {
+						cg = k; st.crew_list[k].job = st.JOB_CARE; st.crew_list[k].care = c;
+						var b : text.Buf = undefined; text.clear(&b);
+						text.put(&b, st.crewName(k)); text.put(&b, " starts nursing "); text.put(&b, st.crewName(c)); text.put(&b, ".");
+						st.say(text.view(&b));
+						break;
+					}
+				}
+			}
+			cared = cg >= 0;
+		}
+		if cared {
+			st.crew_list[c].injury_left -= dt_min;
+			if st.crew_list[c].injury_left <= 0.0 {
+				st.crew_list[c].injury = st.INJURY_NONE;
+				st.crew_list[c].job = st.JOB_IDLE;
+				st.nursed += 1;
+				var b : text.Buf = undefined; text.clear(&b);
+				text.put(&b, st.crewName(c)); text.put(&b, " is back on their feet.");
+				st.say(text.view(&b));
+			}
+		} else {
+			st.crew_list[c].doom -= dt_min;
+			if st.crew_list[c].doom <= 0.0 {
+				st.releaseCrew(c);
+				st.crew_list[c].alive = false;
+				st.crew -= 1;
+				if st.selected_crew == c { st.selected_crew = -1; }
+				died(c, " died of their injuries.");
+			}
+		}
+	}
+}
+
+// ---- radar contacts and missions --------------------------------------------------------------------------------------------------------
+
+// berths still free once everyone on the way here (survivors, settlers) is aboard
+fn rescueSpace() : i32 {
+	var incoming : i32 = 0;
+	for i in 0..st.mission_count { incoming += st.missions[i].c.crew; }
+	return st.tot.crew_cap - st.crew - incoming;
+}
+
+fn rollF(lo : f32, hi : f32) : f32 {
+	return hi > lo ? rnd.randFloatRange(lo, hi) : lo;
+}
+
+fn rollI(lo : i32, hi : i32) : i32 {
+	return hi > lo ? rnd.randRange(lo as u32, hi as u32) as i32 : lo;
+}
+
+// open contacts of kinds the radar finds (needs_radar) or of the others
+fn openContacts(radar : bool) : i32 {
+	var n : i32 = 0;
+	for i in 0..st.contact_count { if cfg.missionStats(cfg.missionKind(st.contacts[i].kind)).needs_radar == radar { n += 1; } }
+	return n;
+}
+
+// a new contact of kind (cfg.missionKind index), rewards rolled now
+fn addContact(kind : i32) : void {
+	if st.contact_count >= cfg.CONTACT_MAX { return; }
+	const s = cfg.missionStats(cfg.missionKind(kind));
+	st.contacts[st.contact_count] = st.Contact {
+		kind, s.open_minutes, rollF(s.fuel_min, s.fuel_max), rollI(s.crew_min, s.crew_max), rollF(s.mixed_min, s.mixed_max), rollF(s.steel_min, s.steel_max),
+		rollF(s.elec_min, s.elec_max), rollF(s.poly_min, s.poly_max), rollF(s.fuel_gain_min, s.fuel_gain_max), rollF(s.water_min, s.water_max)
+	};
+	st.contact_count += 1;
+	var b : text.Buf = undefined; text.clear(&b);
+	text.put(&b, s.needs_radar ? "Radar contact: " : "Spotted: "); text.put(&b, s.name); text.put(&b, ". "); text.put(&b, s.blurb);
+	st.say(text.view(&b));
+}
+
+// a radar contact of a random kind (cfg.MissionStats weights; weight 0 kinds never come from the radar)
+fn newRadarContact() : void {
+	if openContacts(true) >= cfg.RADAR_CONTACT_MAX { return; }
+	var total : f32 = 0.0;
+	for k in 0..cfg.MISSION_KINDS { total += cfg.missionStats(cfg.missionKind(k)).weight; }
+	var pick = rnd.randFloatRange(0.0, total);
+	var kind : i32 = 0;
+	for k in 0..cfg.MISSION_KINDS {
+		const w = cfg.missionStats(cfg.missionKind(k)).weight;
+		if w > 0.0 and pick < w { kind = k; break; }
+		pick -= w;
+	}
+	addContact(kind);
+}
+
+fn kindIndex(kind : cfg.MissionKind) : i32 {
+	for k in 0..cfg.MISSION_KINDS { if cfg.missionKind(k) == kind { return k; } }
+	return 0;
+}
+
+fn removeContact(i : i32) : void {
+	for k in i..(st.contact_count - 1) { st.contacts[k] = st.contacts[k + 1]; }
+	st.contact_count -= 1;
+}
+
+// open contacts run out; a working radar picks up new ones
+fn updateContacts(dt_min : f32) : void {
+	var i : i32 = 0;
+	while i < st.contact_count {
+		st.contacts[i].left -= dt_min;
+		if st.contacts[i].left > 0.0 { i += 1; continue; }
+		var b : text.Buf = undefined; text.clear(&b);
+		text.put(&b, "Contact lost: "); text.put(&b, cfg.missionStats(cfg.missionKind(st.contacts[i].kind)).name);
+		st.say(text.view(&b));
+		removeContact(i);
+	}
+	// nearby scrap needs no radar: a new one some time after the last is gone
+	if openContacts(false) == 0 {
+		st.next_scrap -= dt_min;
+		if st.next_scrap <= 0.0 {
+			st.next_scrap = rnd.randFloatRange(cfg.SCRAP_INTERVAL_MIN, cfg.SCRAP_INTERVAL_MAX);
+			addContact(kindIndex(.Scrap));
+		}
+	}
+	if not st.tot.radar { return; }
+	st.next_contact -= dt_min;
+	if st.next_contact > 0.0 { return; }
+	st.next_contact = rnd.randFloatRange(cfg.CONTACT_INTERVAL_MIN, cfg.CONTACT_INTERVAL_MAX) * (1.0 - st.tot.contact_bonus);
+	newRadarContact();
+}
+
+// a Docking Hub with its shuttle docked and nobody working on it, -1 if none
+fn freeShip() : i32 {
+	for i in 0..st.module_count {
+		const m = st.modules[i];
+		if m.kind == .DockingHub and m.ship == st.SHIP_DOCKED and m.task == st.TASK_NONE and m.hp > 0.0 { return i; }
+	}
+	return -1;
+}
+
+fn shipCount(state : i32) : i32 {
+	var n : i32 = 0;
+	for i in 0..st.module_count { if st.modules[i].kind == .DockingHub and st.modules[i].ship == state { n += 1; } }
+	return n;
+}
+
+// false if contact i can be launched now (a pilot aside), otherwise true with what is missing in `why`
+fn launchBlocked(i : i32, why : *text.Buf) : bool {
+	text.clear(why);
+	if i < 0 or i >= st.contact_count { text.put(why, "No such contact."); return true; }
+	const c = st.contacts[i];
+	const s = cfg.missionStats(cfg.missionKind(c.kind));
+	if s.needs_radar and not st.tot.radar { text.put(why, "The radar is down."); }
+	else if st.mission_count >= cfg.MISSION_MAX { text.put(why, "Too many missions under way."); }
+	else if s.needs_ship and freeShip() < 0 { text.put(why, shipCount(st.SHIP_AWAY) > 0 ? "Every shuttle is away." : "Needs a shuttle: build a Docking Hub, then a shuttle there."); }
+	else if st.res.fuel < c.fuel { text.put(why, "Not enough fuel: needs "); text.putInt(why, c.fuel as i32); text.put(why, " kg."); }
+	else if s.needs_drill and st.res.drills < 1.0 { text.put(why, "Needs a mining drill (workshop job)."); }
+	else if c.crew > 0 and c.crew > rescueSpace() {
+		const free = rescueSpace() > 0 ? rescueSpace() : 0;
+		text.put(why, "Needs "); text.putInt(why, c.crew); text.put(why, c.crew == 1 ? " free berth, " : " free berths, "); text.putInt(why, free); text.put(why, " free.");
+	}
+	return why.len > 0;
+}
+
+fn launchMission(i : i32) : void {
+	if st.over { return; }
+	var why : text.Buf = undefined;
+	if launchBlocked(i, &why) { st.say(text.view(&why)); return; }
+	const c = st.contacts[i];
+	const s = cfg.missionStats(cfg.missionKind(c.kind));
+	var pilot : i32 = -1;
+	var hub : i32 = -1;
+	if s.needs_crew {
+		pilot = st.takeCrew();
+		if pilot < 0 { return; }
+		st.crew_list[pilot].job = st.JOB_MISSION;
+	}
+	if s.needs_ship {
+		hub = freeShip();
+		st.modules[hub].ship = st.SHIP_AWAY;
+	}
+	st.res.fuel -= c.fuel;
+	if s.needs_drill { st.res.drills -= 1.0; }
+	// the pilot's stats: the haul they bring back, how long they are away, how likely it fails
+	var cargo = c;
+	const haul = missionHaul(pilot);
+	cargo.mixed *= haul;
+	cargo.steel *= haul;
+	const minutes = missionMinutes(c.kind, pilot);
+	st.missions[st.mission_count] = st.Mission { cargo, minutes, minutes, pilot, hub, missionRisk(c.kind, pilot) };
+	st.mission_count += 1;
+	removeContact(i);
+	var b : text.Buf = undefined; text.clear(&b);
+	if pilot >= 0 { text.put(&b, st.crewName(pilot)); text.put(&b, hub >= 0 ? " launches the shuttle: " : " goes out on EVA: "); }
+	else { text.put(&b, "Accepted: "); }
+	text.put(&b, s.name); text.put(&b, " ("); text.putF1(&b, minutes / 60.0); text.put(&b, " h)");
+	st.say(text.view(&b));
+}
+
+// what crew member c (-1 = nobody, average) makes of a mission of kind (cfg.missionKind index): see cfg STAT_* for the rules
+fn missionMinutes(kind : i32, c : i32) : f32 {
+	return cfg.missionStats(cfg.missionKind(kind)).minutes / st.statOf(c, cfg.STAT_END) * (st.hasTech(14) ? cfg.TECH_MISSION_TIME : 1.0);
+}
+
+fn missionRisk(kind : i32, c : i32) : f32 {
+	return clampf(cfg.missionStats(cfg.missionKind(kind)).risk * (2.0 - st.statOf(c, cfg.STAT_DEX)) * (st.hasTech(12) ? cfg.TECH_RISK : 1.0), 0.0, 1.0);
+}
+
+// multiplier of the salvage and steel brought back
+fn missionHaul(c : i32) : f32 {
+	return st.statOf(c, cfg.STAT_STR) * (st.hasTech(13) ? cfg.TECH_HAUL : 1.0);
+}
+
+fn ignoreContact(i : i32) : void {
+	if i < 0 or i >= st.contact_count { return; }
+	var b : text.Buf = undefined; text.clear(&b);
+	text.put(&b, "Ignored: "); text.put(&b, cfg.missionStats(cfg.missionKind(st.contacts[i].kind)).name);
+	st.say(text.view(&b));
+	removeContact(i);
+}
+
+// the mission is over: the shuttle docks again, the pilot is free, and unless it failed (risk) the rewards come aboard
+fn finishMission(m : st.Mission) : void {
+	const s = cfg.missionStats(cfg.missionKind(m.c.kind));
+	if m.hub >= 0 and m.hub < st.module_count { st.modules[m.hub].ship = st.SHIP_DOCKED; }
+	const w = m.worker;
+	if w >= 0 and w < st.crew_slots and st.crew_list[w].alive and st.crew_list[w].job == st.JOB_MISSION { st.crew_list[w].job = st.JOB_IDLE; }
+	if m.hub >= 0 { st.ship_missions += 1; }
+	var b : text.Buf = undefined; text.clear(&b);
+	if rnd.randFloatRange(0.0, 1.0) < m.risk {
+		hurtAfterMission(w, true);
+		text.put(&b, s.name); text.put(&b, " failed: ");
+		match cfg.missionKind(m.c.kind) {
+			case .Debris: text.put(&b, "the wreckage was too unstable to cut into.");
+			case .Derelict: text.put(&b, "the derelict broke up before anyone could be saved.");
+			case .Pod: text.put(&b, "the pod was found too late.");
+			case .Starlink: text.put(&b, "the satellites were tumbling too fast to grapple.");
+			case .Asteroid: text.put(&b, "the drill broke on the first metre.");
+			case .Settlers: text.put(&b, "the settlers never arrived.");
+			case .Scrap: text.put(&b, "the wreckage drifted out of reach.");
+		}
+		st.say(text.view(&b));
+		return;
+	}
+	hurtAfterMission(w, false);
+	if (not s.needs_radar) and s.needs_crew { st.eva_hauls += 1; }
+	st.res.water = clampf(st.res.water + m.c.water, 0.0, cfg.WATER_CAP);
+	for k in 0..m.c.crew { st.addCrew(); }
+	// mixed salvage (comms dishes add to it) needs room in the hold, propellant room in the tanks
+	var room = st.tot.mixed_cap - st.res.mixed;
+	if room < 0.0 { room = 0.0; }
+	const haul = m.c.mixed * (1.0 + st.tot.salvage_bonus);
+	const mixed = haul < room ? haul : room;
+	st.res.mixed += mixed;
+	st.res.steel += m.c.steel;
+	st.res.electronics += m.c.electronics;
+	st.res.polymers += m.c.polymers;
+	st.res.fuel = clampf(st.res.fuel + m.c.fuel_gain, 0.0, st.tot.fuel_cap);
+	text.put(&b, s.name); text.put(&b, " done:");
+	if m.c.crew > 0 { text.put(&b, " +"); text.putInt(&b, m.c.crew); text.put(&b, " crew"); }
+	if mixed > 0.5 { text.put(&b, " +"); text.putInt(&b, mixed as i32); text.put(&b, " kg salvage"); }
+	if m.c.steel > 0.5 { text.put(&b, " +"); text.putInt(&b, m.c.steel as i32); text.put(&b, " kg steel"); }
+	if m.c.electronics > 0.5 { text.put(&b, " +"); text.putInt(&b, m.c.electronics as i32); text.put(&b, " kg electronics"); }
+	if m.c.polymers > 0.5 { text.put(&b, " +"); text.putInt(&b, m.c.polymers as i32); text.put(&b, " kg polymers"); }
+	if m.c.fuel_gain > 0.5 { text.put(&b, " +"); text.putInt(&b, m.c.fuel_gain as i32); text.put(&b, " kg fuel"); }
+	if m.c.water > 0.5 { text.put(&b, " +"); text.putInt(&b, m.c.water as i32); text.put(&b, " L water"); }
+	st.say(text.view(&b));
+}
+
+fn updateMissions(dt_min : f32) : void {
+	var i : i32 = 0;
+	while i < st.mission_count {
+		st.missions[i].left -= dt_min;
+		if st.missions[i].left > 0.0 { i += 1; continue; }
+		const m = st.missions[i];
+		for k in i..(st.mission_count - 1) { st.missions[k] = st.missions[k + 1]; }
+		st.mission_count -= 1;
+		finishMission(m);
+	}
+}
+
+// the selected crew member starts building a shuttle at Docking Hub `hub` (finished in build.updateWork)
+fn buildShip(hub : i32) : void {
+	if st.over or hub < 0 or hub >= st.module_count { return; }
+	const m = st.modules[hub];
+	if m.kind != .DockingHub { return; }
+	if not st.hasTech(28) { st.say("Research Shuttle first."); return; }
+	if m.ship != st.SHIP_NONE { st.say("This hub already has its shuttle."); return; }
+	if m.task != st.TASK_NONE { st.say("Someone is already working on that module."); return; }
+	if st.res.steel < (cfg.SHIP_STEEL as f32) or st.res.electronics < (cfg.SHIP_ELECTRONICS as f32) or st.res.polymers < (cfg.SHIP_POLYMERS as f32) or st.res.parts < (cfg.SHIP_PARTS as f32) {
+		st.say("Not enough materials for a shuttle.");
+		return;
+	}
+	const c = st.takeCrew();
+	if c < 0 { return; }
+	st.res.steel -= cfg.SHIP_STEEL as f32;
+	st.res.electronics -= cfg.SHIP_ELECTRONICS as f32;
+	st.res.polymers -= cfg.SHIP_POLYMERS as f32;
+	st.res.parts -= cfg.SHIP_PARTS as f32;
+	var minutes = ((cfg.SHIP_STEEL + cfg.SHIP_ELECTRONICS + cfg.SHIP_POLYMERS + cfg.SHIP_PARTS) as f32) * cfg.WORK_MIN_PER_KG;
+	if minutes < cfg.WORK_MIN_MINUTES { minutes = cfg.WORK_MIN_MINUTES; }
+	st.modules[hub].task = st.TASK_SHIP;
+	st.modules[hub].task_left = minutes;
+	st.modules[hub].task_total = minutes;
+	st.modules[hub].worker = c;
+	st.crew_list[c].job = st.JOB_WORK;
+	var b : text.Buf = undefined; text.clear(&b);
+	text.put(&b, st.crewName(c)); text.put(&b, " starts building a shuttle ("); text.putInt(&b, (minutes / 60.0 + 0.5) as i32); text.put(&b, " h)");
+	st.say(text.view(&b));
+}
+
+// ---- fitness ----------------------------------------------------------------------------------------------------------------------------------
+
+// the exercise machine crew member c is on, -1 if none (or it is broken / not finished)
+fn exerciseRack(c : i32) : i32 {
+	for i in 0..st.rack_count {
+		const r = st.racks[i];
+		if r.staff == c and r.hp > 0.0 and r.task != st.TASK_BUILD and cfg.rackStats(cfg.rackKind(r.kind)).exercise { return i; }
+	}
+	return -1;
+}
+
+// everyone loses fitness, except whoever is on a working exercise machine: they gain it and step off when fully fit
+fn updateFitness(dt_min : f32) : void {
+	for c in 0..st.crew_slots {
+		if not st.crew_list[c].alive { continue; }
+		var f = st.crew_list[c].fitness;
+		const machine = st.crew_list[c].job == st.JOB_EXERCISE ? exerciseRack(c) : -1;
+		if machine >= 0 { f += cfg.FITNESS_GAIN_PER_HOUR * (st.hasTech(5) ? cfg.TECH_FITNESS : 1.0) * st.racks[machine].hp * dt_min / 60.0; }
+		else { f -= cfg.FITNESS_DECAY_PER_DAY * dt_min / cfg.MINUTES_PER_DAY; }
+		st.crew_list[c].fitness = clampf(f, 0.0, 1.0);
+		if machine >= 0 and f >= 1.0 {
+			st.racks[machine].staff = -1;
+			st.crew_list[c].job = st.JOB_IDLE;
+			st.exercised += 1;
+			var b : text.Buf = undefined; text.clear(&b);
+			text.put(&b, st.crewName(c)); text.put(&b, " is fully fit again.");
+			st.say(text.view(&b));
+		}
+	}
+}

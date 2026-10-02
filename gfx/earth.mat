@@ -1,0 +1,22 @@
+shader "/gfx/earth.hlsl"
+backface_culling true
+layer "default"
+texture "/gfx/earth/earth.png"
+texture "/gfx/earth/earth_emissive.png"
+texture "/gfx/earth/earth_splat.png"
+texture "/gfx/earth/detail_ocean.png"
+texture "/gfx/earth/detail_land.png"
+texture "/gfx/earth/detail_ice.png"
+texture "/gfx/earth/detail_burnt.png"
+uniform "Detail tiling", 0.030000
+uniform "Detail strength", 0.700000
+uniform "Night glow", 1.200000
+uniform "Planet radius", 3000.000000
+uniform "Map warp", 3.500000
+uniform "Map sharpness", 0.450000
+uniform "Day glow", 0.150000
+uniform "Coast detail", 0.300000
+uniform "Ocean color", { 1.000000, 1.000000, 1.000000, 1.000000 }
+uniform "Ocean roughness", 0.360000
+uniform "Cloud amount", 0.720000
+uniform "Cloud shadow", 0.750000

@@ -1,0 +1,330 @@
+// Procedural modules: generate(kind, seed) lays out one module as a list of kit parts (models/parts, models/central_kit) in `parts[0..count]`.
+// Every kind has a fixed silhouette (so its ports stay where defs.port says) and a palette it draws hull plates and equipment from at random;
+// the same seed always gives the same module. The caller creates one entity per part (see build.spawn, tools/modgen_preview.evox).
+// Part poses are module-local in ENGINE space. The kits are documented in Blender coordinates (models/readme.md), so placement goes through
+// put(), which takes Blender (x, y, z) and the two rotations the kits use: rx about the hull axis, then rz about the vertical.
+import "core:vec3"
+import "core:quat"
+import "std:math" as math
+import "scripts/defs" as defs
+
+struct Part {
+	model : []const u8;
+	pos : Vec3;
+	rot : Quat;
+	hidden : bool;   // emitted but not shown (a handrail where this dressing has a window): every theme gives the same part list
+}
+
+var parts : [96]Part = undefined;
+var count : i32 = 0;
+
+const PI : f32 = 3.14159265;
+const R : f32 = 1.0;               // hull radius of the cylindrical kit
+
+// ---- random -----------------------------------------------------------------------------------------------------------------------------
+// Marsaglia generator with its own state, so generating a module does not disturb core:random users.
+var ru : u32 = 521288629;
+var rv : u32 = 362436069;
+
+fn next() : u32 {
+	ru = 36969 * (ru % 65536) + ru / 65536;
+	rv = 18000 * (rv % 65536) + rv / 65536;
+	return ru * 65536 + rv;
+}
+
+fn reseed(seed : u32) : void {
+	ru = 521288629 + (seed % 65536) * 7919;
+	rv = 362436069 + (seed / 65536) * 104729 + seed % 977;
+	for i in 0..4 { const warm = next(); }
+}
+
+fn pick(n : i32) : i32 {
+	return (next() % (n as u32)) as i32;
+}
+
+fn chance(p : f32) : bool {
+	return ((next() % 1000) as f32) < p * 1000.0;
+}
+
+fn spread(lo : f32, hi : f32) : f32 {
+	return lo + (hi - lo) * ((next() % 1000) as f32) * 0.001;
+}
+
+fn of2(a : i32, b : i32) : i32 {
+	if pick(2) == 0 { return a; }
+	return b;
+}
+
+fn of3(a : i32, b : i32, c : i32) : i32 {
+	match pick(3) {
+		case 0: return a;
+		case 1: return b;
+		case:
+	}
+	return c;
+}
+
+fn of4(a : i32, b : i32, c : i32, d : i32) : i32 {
+	if pick(2) == 0 { return of2(a, b); }
+	return of2(c, d);
+}
+
+// ---- placement --------------------------------------------------------------------------------------------------------------------------
+fn put(model : []const u8, x : f32, y : f32, z : f32, rx : f32, rz : f32) : void {
+	if count >= 96 { return; }
+	const qx = Quat { math.sin(rx * 0.5), 0.0, 0.0, math.cos(rx * 0.5) };
+	parts[count] = Part { model, Vec3 { x, z, -y }, makeQuatFromYaw(rz) * qx, false };
+	count += 1;
+}
+
+// a part standing on the hull at station x, `deg` degrees around it (90 = on top, 270 = underneath), lifted `off` above the plates
+fn onHull(model : []const u8, x : f32, deg : f32, off : f32) : void {
+	const t = deg * PI / 180.0;
+	put(model, x, (R + off) * math.cos(t), (R + off) * math.sin(t), t - PI * 0.5, 0.0);
+}
+
+// ---- part catalogue ---------------------------------------------------------------------------------------------------------------------
+// hull half-rings (models/parts/hull_*.fbx)
+comptime H_WHITE = 0;
+comptime H_GREEN = 1;
+comptime H_RED = 2;
+comptime H_BLUE = 3;
+comptime H_BASIC = 4;         // torn, patched salvage plates
+comptime H_WINDOW = 5;
+comptime H_HATCH = 6;
+comptime H_PORTHOLE = 7;
+comptime H_PORTHOLE_GREEN = 8;
+comptime H_GRILLE = 9;
+
+fn hull(id : i32) : []const u8 {
+	match id {
+		case 0: return "models/parts/hull_plain_white.fbx";
+		case 1: return "models/parts/hull_plain_green.fbx";
+		case 2: return "models/parts/hull_plain_red.fbx";
+		case 3: return "models/parts/hull_plain_blue.fbx";
+		case 4: return "models/parts/hull_basic.fbx";
+		case 5: return "models/parts/hull_window.fbx";
+		case 6: return "models/parts/hull_hatch.fbx";
+		case 7: return "models/parts/hull_porthole_white.fbx";
+		case 8: return "models/parts/hull_porthole_green.fbx";
+		case:
+	}
+	return "models/parts/hull_grille_red.fbx";
+}
+
+// window and hatch sit on top of their half-ring, so nothing may stand there
+fn topBusy(id : i32) : bool {
+	return id == H_WINDOW or id == H_HATCH;
+}
+
+// attachments (models/parts/part_*.fbx), all standing on their mounting face
+comptime P_NONE = -1;
+comptime P_CRATE = 0;
+comptime P_TANK_BLUE = 1;
+comptime P_TANK_WHITE = 2;
+comptime P_LIGHT = 3;
+comptime P_ANTENNA = 4;
+comptime P_DISH = 5;
+comptime P_VENT = 6;
+comptime P_ELEC = 7;
+comptime P_SOLAR = 8;
+
+fn item(id : i32) : []const u8 {
+	match id {
+		case 0: return "models/parts/part_crate.fbx";
+		case 1: return "models/parts/part_gastank.fbx";
+		case 2: return "models/parts/part_gastank_white.fbx";
+		case 3: return "models/parts/part_light.fbx";
+		case 4: return "models/parts/part_antenna.fbx";
+		case 5: return "models/parts/part_dish.fbx";
+		case 6: return "models/parts/part_vent.fbx";
+		case 7: return "models/parts/part_elec.fbx";
+		case:
+	}
+	return "models/parts/part_solar.fbx";
+}
+
+// ---- palettes: hull dressing by theme (scripts/config.evox T_*, from the module's racks) ---------------------------------------------------------
+// Every call consumes the same random numbers whatever the theme, so re-dressing a module after a refit keeps its part list and only swaps
+// models (build.redress).
+fn topHull(theme : i32) : i32 {
+	const k = pick(4);
+	match theme {
+		case 1: return k == 0 ? H_PORTHOLE : (k == 1 ? H_WHITE : (k == 2 ? H_PORTHOLE_GREEN : H_PORTHOLE));     // habitat: portholes
+		case 2: return k == 0 ? H_WINDOW : (k == 1 ? H_GREEN : (k == 2 ? H_PORTHOLE_GREEN : H_WINDOW));          // plants: windows, green
+		case 3: return k == 0 ? H_BLUE : (k == 1 ? H_PORTHOLE : (k == 2 ? H_HATCH : H_BLUE));                    // lab
+		case 4: return k == 0 ? H_WHITE : (k == 1 ? H_RED : (k == 2 ? H_PORTHOLE : H_RED));                      // medical
+		case 5: return k == 0 ? H_GRILLE : (k == 1 ? H_BLUE : (k == 2 ? H_GRILLE : H_WHITE));                    // machinery
+		case 6: return k == 0 ? H_BASIC : (k == 1 ? H_HATCH : (k == 2 ? H_WHITE : H_BASIC));                     // storage
+		case:
+	}
+	return k < 2 ? H_WHITE : H_BASIC;
+}
+
+fn bottomHull(theme : i32) : i32 {
+	const k = pick(2);
+	match theme {
+		case 1: return k == 0 ? H_WHITE : H_GREEN;
+		case 2: return k == 0 ? H_GREEN : H_WINDOW;
+		case 3: return k == 0 ? H_BLUE : H_WHITE;
+		case 4: return k == 0 ? H_WHITE : H_RED;
+		case 5: return k == 0 ? H_BLUE : H_WHITE;
+		case 6: return k == 0 ? H_BASIC : H_WHITE;
+		case:
+	}
+	return H_WHITE;
+}
+
+// ---- cylindrical modules ----------------------------------------------------------------------------------------------------------------
+// docking end at hull station x, facing -X (rz = 0) or +X (rz = PI): two halves
+fn dock(x : f32, rz : f32) : void {
+	put("models/parts/hull_enddock.fbx", x, 0.0, 0.0, 0.0, rz);
+	put("models/parts/hull_enddock.fbx", x, 0.0, 0.0, PI, rz);
+}
+
+// `n` one-metre rings along X, a dock at each end, hull plates in the theme's palette and random handrail decoration (never on the
+// attachment slots, which sit on the side diagonals)
+fn cylinder(n : i32, theme : i32) : void {
+	const half = (n as f32) * 0.5;
+	for k in 0..n {
+		const x = -half + 0.5 + (k as f32);
+		const top = topHull(theme);
+		const bottom = bottomHull(theme);
+		put(hull(top), x, 0.0, 0.0, 0.0, 0.0);
+		put(hull(bottom), x, 0.0, 0.0, PI, 0.0);
+		// every random number is drawn whatever the outcome, so the part list never depends on the theme
+		const rail_top = chance(0.6);
+		const shift = spread(-0.3, 0.3);
+		const turn = of2(0, 1);
+		const rail_under = chance(0.4);
+		if k % 2 == 0 and rail_top {
+			put("models/parts/part_handrail.fbx", x + 0.5 * shift, 0.0, R + 0.02, 0.0, (turn as f32) * PI);
+			parts[count - 1].hidden = topBusy(top);
+		}
+		if k % 2 == 1 and rail_under {
+			onHull("models/parts/part_handrail.fbx", x, 270.0, 0.02);
+			parts[count - 1].hidden = topBusy(bottom);
+		}
+	}
+	dock(-half, 0.0);
+	dock(half, PI);
+}
+
+fn junction() : void {
+	cylinder(2, 0);   // the pads below cover its top and underside, so its handrails sit there harmlessly or are hidden
+	put("models/parts/node_ports.fbx", 0.0, 0.0, 0.0, 0.0, 0.0);
+	put("models/parts/part_pad.fbx", 0.0, 0.0, R + 0.02, 0.0, 0.0);
+	put("models/parts/part_pad.fbx", 0.0, 0.0, -R - 0.02, PI, 0.0);
+}
+
+// ---- wings and other units on a mounting pad (origin on the pad, +X away from the host) ---------------------------------------------------
+fn wing(good : []const u8, torn : []const u8) : void {
+	put("models/parts/wing_mount.fbx", 0.0, 0.0, 0.0, 0.0, 0.0);
+	for k in 0..3 {
+		// the root section is always whole; further out a section may have lost part of a panel
+		const broken = k > 0 and chance(0.3);
+		put(broken ? torn : good, 0.5 + (k as f32), 0.0, 0.0, (of2(0, 1) as f32) * PI, 0.0);
+	}
+}
+
+fn gasStorage() : void {
+	put("models/parts/wing_mount.fbx", 0.0, 0.0, 0.0, 0.0, 0.0);
+	put("models/parts/wing_boom.fbx", 0.5, 0.0, 0.0, 0.0, 0.0);
+	// tanks strapped around the boom; one of the four places may be empty
+	const skip = pick(5);
+	for k in 0..4 {
+		if k == skip { continue; }
+		const a = (k as f32) * PI * 0.5;
+		put(item(of2(P_TANK_BLUE, P_TANK_WHITE)), 1.0, -0.06 * math.sin(a), 0.06 * math.cos(a), a, 0.0);
+	}
+}
+
+// ---- docking hub: a two-ring machinery hull; its +X dock is the shuttle berth ----------------------------------------------------------------
+// The shuttle (ship_shuttle: origin on its dock face, body along +X) is always the LAST part, emitted hidden: build.syncShips shows it while one is docked
+fn dockingHub() : void {
+	cylinder(2, 5);
+	put("models/parts/part_light.fbx", 0.3, 0.0, R + 0.02, 0.0, PI);
+	put("models/parts/ship_shuttle.fbx", 1.6, 0.0, 0.0, 0.0, 0.0);
+	parts[count - 1].hidden = true;
+}
+
+// ---- central module: 16-sided lens, every facet takes one wall, one roof and one underside piece turned k * 22.5 degrees --------------------
+fn wallPiece() : []const u8 {
+	match pick(12) {
+		case 0: return "models/central_kit/cen_wall_green.fbx";
+		case 1: return "models/central_kit/cen_wall_red.fbx";
+		case 2: return "models/central_kit/cen_wall_blue.fbx";
+		case 3: return "models/central_kit/cen_wall_green_vent.fbx";
+		case 4: return "models/central_kit/cen_wall_red_vent.fbx";
+		case 5: return "models/central_kit/cen_wall_blue_vent.fbx";
+		case 6: return "models/central_kit/cen_wall_porthole.fbx";
+		case 7: return "models/central_kit/cen_wall_locker.fbx";
+		case 8: return "models/central_kit/cen_wall_panel.fbx";
+		case 9: return "models/central_kit/cen_wall_scrap.fbx";
+		case:
+	}
+	return "models/central_kit/cen_wall_white.fbx";
+}
+
+// the roof is plain: its solar and vent facets are attachments now (attachModel)
+fn roofPiece() : []const u8 {
+	return "models/central_kit/cen_roof_plain.fbx";
+}
+
+fn central() : void {
+	const step = PI / 8.0;
+	for k in 0..16 {
+		const a = (k as f32) * step;
+		// docking ports on every fourth facet: +X, -Z, -X, +Z in engine space (defs.port)
+		put(k % 4 == 0 ? "models/central_kit/cen_port.fbx" : wallPiece(), 0.0, 0.0, 0.0, 0.0, a);
+		put(roofPiece(), 0.0, 0.0, 0.0, 0.0, a);
+		put("models/central_kit/cen_under.fbx", 0.0, 0.0, 0.0, 0.0, a);
+	}
+	put("models/central_kit/cen_hub_top.fbx", 0.0, 0.0, 0.0, 0.0, 0.0);
+	put("models/central_kit/cen_hub_bottom.fbx", 0.0, 0.0, 0.0, 0.0, 0.0);
+}
+
+// Part index of the roof piece on Central Module facet f: central() emits wall, roof, underside per facet. A solar or vent attachment on a
+// Central roof slot replaces that facet's roof piece, which is hidden while it is fitted
+fn centralRoofPart(facet : i32) : i32 {
+	return facet * 3 + 1;
+}
+
+// model of an attachment (scripts/config.evox AttachKind order, 1..ATTACH_COUNT); on the Central Module's roof solar panels and vents are whole roof facets
+fn attachModel(index : i32, on_central : bool) : []const u8 {
+	if on_central and index == 1 { return "models/central_kit/cen_roof_solar.fbx"; }
+	if on_central and index == 2 { return "models/central_kit/cen_roof_vent.fbx"; }
+	match index {
+		case 1: return "models/parts/part_solar.fbx";
+		case 2: return "models/parts/part_vent.fbx";
+		case 3: return "models/parts/part_crate.fbx";
+		case 4: return "models/parts/part_gastank.fbx";
+		case 5: return "models/parts/part_gastank_white.fbx";
+		case 6: return "models/parts/part_elec.fbx";
+		case 7: return "models/parts/part_light.fbx";
+		case 8: return "models/parts/part_antenna.fbx";
+		case 9: return "models/parts/part_dish.fbx";
+		case 10: return "models/parts/part_radar.fbx";
+		case:
+	}
+	return "models/parts/part_elec.fbx";
+}
+
+fn replacesRoof(index : i32, on_central : bool) : bool {
+	return on_central and (index == 1 or index == 2);
+}
+
+// ---- entry point ----------------------------------------------------------------------------------------------------------------------------
+fn generate(kind : defs.ModuleKind, seed : u32, theme : i32) : void {
+	count = 0;
+	reseed(seed);
+	match kind {
+		case .Central: central();
+		case .Junction: junction();
+		case .SolarWing: wing("models/parts/wing_solar.fbx", "models/parts/wing_solar_torn.fbx");
+		case .RadiatorWing: wing("models/parts/wing_radiator.fbx", "models/parts/wing_radiator_torn.fbx");
+		case .GasStorage: gasStorage();
+		case .DockingHub: dockingHub();
+		case: cylinder(defs.rings(kind), theme);
+	}
+}
