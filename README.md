@@ -1,4 +1,4 @@
-# lumix_space_game
+# Still Above: Orbital refuge
 Space station simulation game made in Lumix Engine. Design docs are in `design/` (start with `design/game.md`).
 
 ![Screenshot](screenshot.jpg)
