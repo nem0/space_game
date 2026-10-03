@@ -275,8 +275,9 @@ fn central() : void {
 	const step = PI / 8.0;
 	for k in 0..16 {
 		const a = (k as f32) * step;
-		// docking ports on every fourth facet: +X, -Z, -X, +Z in engine space (defs.port)
-		put(k % 4 == 0 ? "models/central_kit/cen_port.fbx" : wallPiece(), 0.0, 0.0, 0.0, 0.0, a);
+		// the one docking port on facet 0 (+X, defs.port) the visual-only EVA hatch opposite it and the reboost thrusters on the +-Z facets (boost_fx.evox); wallPiece() is drawn on every facet to keep the random sequence
+		const wall = wallPiece();
+		put(k == 0 ? "models/central_kit/cen_port.fbx" : (k == 8 ? "models/central_kit/cen_eva.fbx" : (k == 4 or k == 12 ? "models/central_kit/cen_thruster.fbx" : wall)), 0.0, 0.0, 0.0, 0.0, a);
 		put(roofPiece(), 0.0, 0.0, 0.0, 0.0, a);
 		put("models/central_kit/cen_under.fbx", 0.0, 0.0, 0.0, 0.0, a);
 	}

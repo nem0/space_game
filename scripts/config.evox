@@ -89,6 +89,7 @@ const ALT_DECAY_DOUBLING_KM : f32 = 40.0;
 const ALT_WARN_KM : f32 = 330.0;              // alert below this
 const ALT_REENTRY_KM : f32 = 200.0;           // the station is lost below this
 const ALT_MAX_KM : f32 = 450.0;
+const AUTOSAVE_SECONDS : f32 = 30.0;           // real seconds between autosaves (scripts/save.evox)
 const SAFE_ALT_KM : f32 = 375.0;              // objective "stop the descent": back above this altitude
 const BOOST_TARGET_KM : f32 = 420.0;          // a reboost burn stops here
 const BOOST_KM_PER_HOUR : f32 = 10.0;         // climb rate while burning (game hours)

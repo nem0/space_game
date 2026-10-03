@@ -516,6 +516,16 @@ fn clearAttachGhost(world : World) : void {
 	g_aghost_kind = 0;
 }
 
+// destroys every entity of the station (modules, attachments and the ghosts); the records are reset by st.resetResources
+fn teardown(world : World) : void {
+	for i in 0..st.part_count { world.destroyEntity(st.parts[i].entity); }
+	for i in 0..st.attach_count { world.destroyEntity(st.attachments[i].entity); }
+	st.part_count = 0;
+	st.attach_count = 0;
+	clearGhost(world);
+	clearAttachGhost(world);
+}
+
 fn updateAttachGhost(world : World) : void {
 	if st.build_attach <= 0 {
 		st.aim_host = -1;

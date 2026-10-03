@@ -1,0 +1,22 @@
+// Soft round glow for the reboost burn (gfx/particles/boost.pat): white, alpha falls off smoothly to zero at the edge. The particle colour tints it.
+import "core:texture_recipe"
+import "core:vec4"
+import "std:math" as math
+
+const SIZE : u32 = 128;
+
+fn main() : Texture2D {
+	var image = create(SIZE, SIZE, 4);
+	for y in 0..SIZE {
+		for x in 0..SIZE {
+			const dx = (x as f32 + 0.5) / SIZE as f32 * 2.0 - 1.0;
+			const dy = (y as f32 + 0.5) / SIZE as f32 * 2.0 - 1.0;
+			const d = math.min(math.sqrt(dx * dx + dy * dy), 1.0);
+			const f = 1.0 - d;
+			// bright hot core on top of a wide soft halo
+			const a = f * f * f * 0.65 + f * f * f * f * f * f * 0.35;
+			setPixel(image, x, y, Vec4 { 1, 1, 1, a });
+		}
+	}
+	return texture2D(image);
+}

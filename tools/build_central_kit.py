@@ -12,6 +12,7 @@ N = 16; STEP = math.tau/N; TA = math.tan(math.pi/N)                # facets, sec
 A = 3.0; ZB = .75                                                  # band apothem, band half-height
 ST = (A - .15, .90); SB = (A - .20, -.95)                          # (apothem, z) where the shoulders end and roof / underside begin
 RI = (1.25, 1.40); UI = (1.30, -1.50)                              # (apothem, z) where roof / underside meet the hubs
+THRUST_X = 3.40; THRUST_Y = .30; THRUST_Z = -.15                                  # thruster nozzle exit plane, half spacing, height
 PORT_X = 3.40                                                      # x = 0 of the dock frame: the flange face (0.6 further out) sits at 4.0
 Y = V((0, 1, 0)); Zv = V((0, 0, 1))
 
@@ -78,6 +79,29 @@ def port(seed=20):
     for s in (-1, 1): hbar(b, [V((3.12, s*.62, .66)), V((3.06, s*.66, .64)), V((A + .12, s*(A + .12)*TA, .625))], .012, 'CABLE_RED', 5)
     return b
 
+def eva(seed=21):
+    """a facet with a visual EVA hatch: a short barrel standing out of the hull, steel flange ring, a closed round door with a handwheel, grab rails and a lamp"""
+    b = wall('HULL_WHITE', None, seed, bare=True); R0 = .50; L = .55; c = V((A - .05, 0, -.02)); E = A - .05 + L                  # barrel from inside the hull to x = E
+    b.revolve(c, X, Y, Zv, [(R0, 0, 'TANK_WHITE'), (R0, L - .06, 'TANK_WHITE'), (R0 + .07, L - .06, 'SW_STEEL'), (R0 + .07, L, 'SW_STEEL'), (R0 - .06, L, 'SW_STEEL'), (R0 - .06, L - .05, 'SW_STEEL'), (0, L - .05, 'SW_STEEL')], 28)   # barrel, flange, door
+    b.revolve(c + X*(L - .05), X, Y, Zv, [(R0 - .10, 0, 'RIB'), (R0 - .10, .02, 'RIB'), (R0 - .16, .02, 'SW_WHITE'), (0, .02, 'SW_WHITE')], 28)                                   # raised door panel
+    for k in range(12): a = k*math.tau/12 + .13; rivet(b, c + X*L + (Y*math.cos(a) + Zv*math.sin(a))*(R0 + .035), X, .017, .014, 'SW_BARE')
+    for k in range(3): a = k*math.tau/3 + math.pi/2; hbar(b, [c + X*(L + .01), c + X*(L + .05) + (Y*math.cos(a) + Zv*math.sin(a))*.17], .016, 'SW_STEEL', 6)   # handwheel spokes
+    hbar(b, [c + X*(L + .05) + (Y*math.cos(k*math.tau/24) + Zv*math.sin(k*math.tau/24))*.17 for k in range(25)], .016, 'SW_STEEL', 6); cyl(b, c + X*(L + .03), .05, .06, 'x', 'SW_STEEL', 10)
+    for sy in (-1, 1): hbar(b, [V((E - .30, sy*.80, -.40)), V((E - .12, sy*.80, -.40)), V((E - .12, sy*.80, .36)), V((E - .30, sy*.80, .36))], .02, 'PIPE_YELLOW', 6)
+    b.box((E - .15, -.52, .56), (.08, .12, .08), default=SW('SW_LIGHT'))
+    return b
+
+def thruster(seed=22):
+    """a facet with two small reboost thrusters: bells on short housings, exit plane THRUST_X from the centre (boost_fx.evox starts the plume there), propellant lines and a clamp plate"""
+    b = wall('HULL_WHITE', None, seed, bare=True); x0 = A + .04
+    b.box((A + .05, 0, -.15), (.10, 1.0, .56), maps=faces('BOX', px='BOX_ELEC'))                                          # mounting plate
+    for sy in (-1, 1):
+        c = V((x0 + .05, sy*THRUST_Y, THRUST_Z)); b.box((x0 + .02, sy*THRUST_Y, THRUST_Z), (.06, .34, .34), maps={'+x': FIT('BRACKET', 'x')}, default=SW('SW_STEEL'))
+        b.revolve(c, X, Y, Zv, [(.15, 0, ''), (.15, .17, 'TANK_WHITE'), (.10, .17, 'SW_STEEL'), (.19, THRUST_X - x0 - .05, 'SW_STEEL'), (.155, THRUST_X - x0 - .05, 'SW_STEEL'), (.07, .17, 'SW_DARK'), (0, .17, 'SW_DARK')], 20)
+        hbar(b, [V((A + .1, sy*.50, .06)), V((x0 + .08, sy*(THRUST_Y + .17), -.02)), V((x0 + .08, sy*(THRUST_Y + .17), THRUST_Z + .1))], .012, 'PIPE_YELLOW', 6)
+    hbar(b, [V((A + .1, -.5, .06)), V((A + .1, 0, .12)), V((A + .1, .5, .06))], .012, 'CABLE_RED', 5)
+    return b
+
 # ----------------------------------------------------------------------------------------------------------------- roof / underside sectors
 def roof(kind='solar', seed=30):
     """roof sector: plates + edge ribs; solar = two columns of cells down the slope, vent = short solar row + an air handler near the hub, plain = plates only"""
@@ -138,15 +162,15 @@ def hub_bottom():
 KIT = [('cen_wall_white', lambda: wall('HULL_WHITE', None, 1)), ('cen_wall_green', lambda: wall('HULL_GREEN', None, 2)), ('cen_wall_red', lambda: wall('HULL_RED', None, 3)),
        ('cen_wall_blue', lambda: wall('HULL_BLUE', None, 4)), ('cen_wall_green_vent', lambda: wall('HULL_GREEN', 'vent', 5)), ('cen_wall_red_vent', lambda: wall('HULL_RED', 'vent', 6)),
        ('cen_wall_blue_vent', lambda: wall('HULL_BLUE', 'vent', 7)), ('cen_wall_porthole', lambda: wall('HULL_WHITE', 'porthole', 8)), ('cen_wall_locker', lambda: wall('HULL_WHITE', 'locker', 9)),
-       ('cen_wall_panel', lambda: wall('HULL_WHITE', 'panel', 10)), ('cen_wall_scrap', lambda: wall('HULL_SCRAP', None, 11)), ('cen_port', port),
+       ('cen_wall_panel', lambda: wall('HULL_WHITE', 'panel', 10)), ('cen_wall_scrap', lambda: wall('HULL_SCRAP', None, 11)), ('cen_port', port), ('cen_eva', eva), ('cen_thruster', thruster),
        ('cen_roof_solar', lambda: roof('solar')), ('cen_roof_vent', lambda: roof('vent', 31)), ('cen_roof_plain', lambda: roof('plain', 32)), ('cen_under', under),
        ('cen_hub_top', hub_top), ('cen_hub_bottom', hub_bottom)]
 OBJ, log, mat = build_kit(KIT, OUT)
 
-# demo: the concept's layout - ports left and right with seven facets between them (plus one at the back); also written to demo_layout.json for tools/gen_parts_demo.py
+# demo: one docking port (facet 0) and the EVA hatch (facet 8) opposite; also written to demo_layout.json for tools/gen_parts_demo.py
 demo = Demo(OBJ, OUT)
 WALLS = ['cen_port', 'cen_wall_locker', 'cen_wall_panel', 'cen_wall_red_vent', 'cen_wall_porthole', 'cen_wall_green_vent', 'cen_wall_green', 'cen_wall_locker',
-         'cen_port', 'cen_wall_panel', 'cen_wall_blue', 'cen_wall_blue_vent', 'cen_port', 'cen_wall_scrap', 'cen_wall_red', 'cen_wall_locker']
+         'cen_eva', 'cen_wall_panel', 'cen_wall_blue', 'cen_wall_blue_vent', 'cen_thruster', 'cen_wall_scrap', 'cen_wall_red', 'cen_wall_locker']
 ROOFS = {2: 'cen_roof_vent', 6: 'cen_roof_vent', 10: 'cen_roof_vent', 14: 'cen_roof_plain'}
 for k in range(N):
     a = (0, 0, -k*STEP)                                                                        # facet 4 (porthole) faces -Y, towards the preview camera

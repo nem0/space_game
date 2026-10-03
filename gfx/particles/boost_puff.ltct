@@ -1,0 +1,27 @@
+// Soft turbulent puff for the exhaust plume (gfx/particles/boost.pat): white with a noisy, round alpha so each particle looks like a wisp of
+// burning gas instead of a disc. The particle colour tints it.
+import "core:texture_recipe"
+import "core:vec4"
+import "std:math" as math
+
+const SIZE : u32 = 128;
+
+fn main() : Texture2D {
+	const coarse = gradientNoise(SIZE, SIZE, 3.0);
+	const fine = gradientNoise(SIZE, SIZE, 9.0);
+	var image = create(SIZE, SIZE, 4);
+	for y in 0..SIZE {
+		for x in 0..SIZE {
+			const dx = (x as f32 + 0.5) / SIZE as f32 * 2.0 - 1.0;
+			const dy = (y as f32 + 0.5) / SIZE as f32 * 2.0 - 1.0;
+			const d = math.min(math.sqrt(dx * dx + dy * dy), 1.0);
+			const n = getPixel(coarse, x, y).x * 0.65 + getPixel(fine, x, y).x * 0.35;   // about 0.2 .. 0.8
+			const f = 1.0 - d;
+			var a = f * f * (0.35 + n * 1.1) * 1.3;
+			if a > 1.0 { a = 1.0; }
+			if a < 0.0 { a = 0.0; }
+			setPixel(image, x, y, Vec4 { 1, 1, 1, a });
+		}
+	}
+	return texture2D(image);
+}

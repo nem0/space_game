@@ -1,0 +1,89 @@
+// Reboost burn visuals: an exhaust plume (gfx/particles/boost.pat) and a flickering light at the station's tail while st.boosting is set.
+// The engine stays dark when idle: the emitter entity only exists while the burn runs and for the fade-out after it.
+import "core:world"
+import "core:entity"
+import "core:vec3"
+import "core:quat" as quat
+import "std:math" as math
+import "core:renderer/particle_emitter"
+import "core:renderer/point_light"
+import "scripts/defs" as defs
+import "scripts/state" as st
+import "scripts/station_orbit" as flight
+
+const RAMP_UP_SECONDS : f32 = 0.5;
+const RAMP_DOWN_SECONDS : f32 = 1.0;
+const THRUSTER_EXIT : f32 = 3.38;   // nozzle exit plane of the Central Module thrusters from its centre (tools/build_central_kit.py THRUST_X)
+const THRUSTER_HEIGHT : f32 = -0.15; // nozzle height above the module centre (THRUST_Z)
+const EXHAUST_FLIP : bool = false;  // true = send the plume the other way along the axis
+const LIGHT_COLOR : Vec3 = Vec3 { 1.0, 0.55, 0.22 };
+const LIGHT_POWER : f32 = 0.9;
+const LIGHT_RANGE : f32 = 8.0;
+
+var g_fx : ?Entity = null;
+var g_thrust : f32 = 0.0;     // 0..1, throttles the plume
+var g_time : f32 = 0.0;
+
+// station-local direction the exhaust flies: against the orbital motion (the burn pushes the station prograde). The orbiting frame is a rotation
+// about X by -phase, so the direction of travel in it never changes: the way the "up" vector turns over a small step of phase.
+// Always +-Z: the Central Module's two thruster facets (modgen.central, facets 4 and 12) face that way.
+fn exhaustDir() : Vec3 {
+	const up = flight.stationUp();
+	const step = defs.rotate(quat.makeQuatFromPitch(-0.01), up);
+	const d = normalizeSafe(up - step) * (EXHAUST_FLIP ? -1.0 : 1.0);
+	return Vec3 { 0, 0, d.z < 0.0 ? -1.0 : 1.0 };
+}
+
+// between the two nozzles of the Central Module thruster facing the exhaust direction
+fn nozzle(dir : Vec3) : Vec3 {
+	return st.modules[0].pos + dir * THRUSTER_EXIT + Vec3 { 0, THRUSTER_HEIGHT, 0 };
+}
+
+fn spawn(world : World) : void {
+	const e = world.createEntity();
+	e.setName("Boost exhaust");
+	if const p = e.createParticleEmitter() {
+		p.setPath("gfx/particles/boost.pat");
+	}
+	if const l = e.createPointLight() {
+		l.setColor(LIGHT_COLOR);
+		l.setIntensity(0.0);
+		l.setRange(LIGHT_RANGE);
+		l.setCastShadows(false);
+	}
+	g_fx = e;
+}
+
+fn update(world : World, dt : f32) : void {
+	g_time += dt;
+	if st.boosting and st.module_count > 0 {
+		if g_fx == null { spawn(world); }
+		g_thrust += dt / RAMP_UP_SECONDS;
+		if g_thrust > 1.0 { g_thrust = 1.0; }
+	} else if g_thrust > 0.0 {
+		g_thrust -= dt / RAMP_DOWN_SECONDS;
+		if g_thrust < 0.0 { g_thrust = 0.0; }
+	}
+
+	const e = g_fx else return;
+	if g_thrust <= 0.0 and not st.boosting {
+		e.destroy();
+		g_fx = null;
+		return;
+	}
+
+	const dir = exhaustDir();
+	e.setPosition(flight.toWorld(nozzle(dir)));
+	// the emitter's +Z axis is the exhaust direction (see boost.pat)
+	e.setRotation(flight.frameRotation() * defs.fromTo(Vec3 { 0, 0, 1 }, dir));
+	if const p = e.particleEmitter() {
+		// look the id up every frame, never cache it: the script loads asynchronously and Studio reloads it when it changes, and during either
+		// the globals list is empty (-1) or different, so a stored id would index outside it
+		const id = p.getGlobalID("thrust");
+		if id >= 0 { p.setFloatGlobal(id, g_thrust); }
+	}
+	if const l = e.pointLight() {
+		const flicker = 0.8 + 0.12 * math.sin(g_time * 37.0) + 0.08 * math.sin(g_time * 91.0);
+		l.setIntensity(LIGHT_POWER * g_thrust * flicker);
+	}
+}

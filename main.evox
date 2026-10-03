@@ -15,8 +15,10 @@ import "scripts/state" as st
 import "scripts/sim" as sim
 import "scripts/build" as build
 import "scripts/orbit" as orbit
+import "scripts/boost_fx" as boost_fx
 import "scripts/station_orbit" as flight
 import "scripts/hud" as hud
+import "scripts/save" as save
 import "scripts/config" as cfg
 
 fn speedFactor() : f32 {
@@ -45,9 +47,13 @@ fn main(engine : Engine, world : World) : void {
 	const input = engine.input();
 	orbit.initScene(world);
 	build.startStation(world);
+	save.refresh();
 	hud.init(world);
 	var shift = false;
 	var click_wait : i32 = 0;
+	var save_timer : f32 = 0.0;    // real seconds since the last autosave
+	var was_menu = st.menu;
+	var was_over = false;
 	var right_drag : f32 = -1.0;   // mouse travel since the right button went down; -1 = not held   // frames until a world click is resolved (the HUD reports its own presses a frame later)
 
 	while true {
@@ -99,6 +105,7 @@ fn main(engine : Engine, world : World) : void {
 		if not st.over { build.updateWork(world, dt * speedFactor()); }
 		build.syncShips();
 		flight.updateModules();
+		boost_fx.update(world, dt);
 		orbit.update(dt);
 		build.ensureSelection();
 		hud.update(world, dt);
@@ -109,5 +116,16 @@ fn main(engine : Engine, world : World) : void {
 			if hud.uiDown() { click_wait = 0; }
 			else if click_wait == 0 { hud.placeAimed(world); }
 		}
+
+		// autosave every AUTOSAVE_SECONDS and whenever the menu opens; a lost game deletes the save
+		if st.game_started {
+			if st.over { if not was_over { save.erase(); } }
+			else {
+				save_timer += dt;
+				if save_timer >= cfg.AUTOSAVE_SECONDS or (st.menu and not was_menu) { save_timer = 0.0; save.save(); }
+			}
+		}
+		was_menu = st.menu;
+		was_over = st.over;
 	}
 }

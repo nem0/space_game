@@ -15,6 +15,7 @@ import "scripts/sim" as sim
 import "scripts/build" as build
 import "scripts/orbit" as orbit
 import "scripts/objectives" as obj
+import "scripts/save" as save
 import "core:random" as rnd
 
 var g_timer : f32 = 0.0;          // seconds until the next refresh (setText re-lays out the document, so texts are refreshed at ~4 Hz)
@@ -1324,7 +1325,7 @@ fn refresh(doc : Document) : void {
 
 
 	show(doc, "menu", st.menu);
-	show(doc, "mn_continue", not st.game_started);
+	show(doc, "mn_continue", not st.game_started and save.exists());
 	show(doc, "mn_start", not st.game_started);
 	show(doc, "mn_resume", st.game_started);
 	show(doc, "mn_new", st.game_started);
@@ -1514,13 +1515,19 @@ fn doBuildAttach(index : i32) : void {
 }
 
 fn restart(world : World) : void {
-	for i in 0..st.part_count { world.destroyEntity(st.parts[i].entity); }
+	build.teardown(world);
 	build.startStation(world);
 	g_result = "";
 }
 
 fn handle(world : World, doc : Document) : void {
 	for event in doc.getEvents() {
+		// a click or move over empty space carries no element (0xFFFFFFFF): getElement would index out of range
+		const no_element = event.element_index == 0xFFFFFFFF;
+		if no_element and (event.type == .MOUSE_ENTER or event.type == .MOUSE_LEAVE or event.type == .MOUSE_DOWN) {
+			// a click on empty space is world input, not HUD
+			continue;
+		}
 		if event.type == .MOUSE_ENTER {
 			if const e = doc.getElement(event.element_index) {
 				const h = hoverIndex(e.getID());
@@ -1701,7 +1708,9 @@ fn dispatch(world : World, action : []const u8) : void {
 		case "menu_start": st.menu = false; st.game_started = true;
 		case "menu_new": restart(world); st.menu = false; st.game_started = true; g_nav = 7;
 		case "menu_controls": g_help = not g_help;
-		case "menu_continue": g_timer = 0.0;   // no saved games yet: nothing to continue
+		case "menu_continue":
+			if save.load(world) { st.menu = false; st.game_started = true; g_result = ""; g_nav = 7; }
+			else { g_result = "Could not load the saved game."; g_result_t = 4.0; }
 		case "build_1": doBuild(world, 1);
 		case "build_2": doBuild(world, 2);
 		case "build_3": doBuild(world, 3);

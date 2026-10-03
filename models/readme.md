@@ -103,16 +103,14 @@ bash tools/parts_demo.sh spawn --kit central_kit --yaw 320 --lift 1.0 --move 5.1
 - **Placement rule:** every sector piece is built for the facet facing +X with its origin at the MODULE CENTRE. Put it at the module origin and turn it k * 22.5 deg about the
   vertical axis to put it on facet k. One wall + one roof + one underside piece per facet, plus the two hubs (whole pieces, no rotation needed).
 - Wall pieces (interchangeable): `cen_wall_{white,green,red,blue,scrap}`, `cen_wall_{green,red,blue}_vent`, `cen_wall_porthole` (window + hung equipment box), `cen_wall_locker`,
-  `cen_wall_panel`, and `cen_port`. Each wall brings half a post with clamp blocks at both edges (two neighbours make a full post), rim beams, yellow rim pipes and cable runs
+  `cen_wall_panel`, `cen_port`, `cen_thruster` (two small nozzles) and `cen_eva` (visual EVA hatch: short barrel protruding from the hull, closed round door with handwheel, grab rails). Each wall brings half a post with clamp blocks at both edges (two neighbours make a full post), rim beams, yellow rim pipes and cable runs
   that meet the neighbours' at the corners.
 - `cen_port`: a wall facet with a barrel (r 0.86) and the same docking flange as `hull_enddock` (`parts_lib.dock_flange()`); flange face 4.0 m from the centre, so a habitat's dock
-  face meets it there. Ports can go on any facet: the demo follows the picture (ports on facets 0, 8 and 12, the porthole facet between them) although the concept's text says
-  four ports at 90 deg - swap facet 4 for `cen_port` to get that.
+  face meets it there. Ports can go on any facet: the demo follows the picture (port on facet 0, EVA hatch on facet 8).
 - Roof pieces: `cen_roof_solar`, `cen_roof_vent` (short solar row + air handler near the hub), `cen_roof_plain`. Underside: `cen_under` (three dark radiator panels).
 - Hubs: `cen_hub_top` (drum, railed deck, turret with vent faces; stand `part_antenna` / `part_dish` from the habitat kit on the turret at z = 2.02), `cen_hub_bottom` (drum, vent
   block, sensor mast).
-- Not done: collision / LODs, a fourth port in the kit demo (the game's central module has all four),
-  interior behind the porthole.
+- Not done: collision / LODs, interior behind the porthole.
 
 ## Generated modules (`scripts/modgen.evox`)
 The game has no per-module models. `modgen.generate(kind, seed)` fills `modgen.parts[0..count]` with kit parts (model path + module-local pose in engine space);
@@ -123,11 +121,11 @@ the game seeds from `core:random`, so every module built is different.
   Equipment zones follow the kit: top deck (not on window / hatch rings), the 41 deg side, the underside at 238 / 302 deg.
 - Docking Hub: two machinery rings, a work light and `ship_shuttle` as its last part, hidden while it has no shuttle (`build.syncShips`).
 - Junction: two rings + `node_ports` + a `part_pad` above and below. Wings: `wing_mount` + three sections, outer ones sometimes torn. Gas storage: mount + boom + 3-4 tanks.
-  Central module: 16 facets of random `cen_wall_*` / `cen_roof_*`, `cen_port` on every fourth facet, hubs, antenna and dish.
+  Central module: 16 facets of random `cen_wall_*` / `cen_roof_*`, `cen_port` on facet 0, `cen_eva` on facet 8 and `cen_thruster` on facets 4 and 12 (the reboost plume of `scripts/boost_fx.evox` starts between their nozzles: keep `THRUST_X` / `THRUST_Z` in the kit and the constants there in sync), hubs, antenna and dish.
 - **Ports are defined twice and must agree:** `defs.port()` / `defs.tip()` (game logic) and the layout in `modgen.evox` (what is drawn). Dock faces: cylinders at
   +-(rings / 2 + 0.6) on X, junction side ports at +-2.0 on Z and pads at +-1.12 on Y, central at +-4.0 on X and Z. Change a kit dimension -> change both.
 - `put()` takes Blender coordinates and the kit's two rotations (rx about the hull axis, then rz about the vertical), so layouts can be copied from the kit builders' demos.
 - Preview in Studio without running the game: `bash tools/parts_demo.sh module KIND SEED [--at X Y Z] [--yaw DEG] [--up|--down] [--keep]` (one module, `KIND` = index of
   `defs.kindFromIndex`), `bash tools/preview_station.sh X Y Z [SEED]` (a small station: central, five cylinders, junction, wing, gas storage) -> `screenshots/generated_station.png`.
-- Changed with the move to kits: the central module has four docking ports and no wing pads (its own solar roof and radiators are counted in its stats: power 1.7, cooling 2.5),
+- Changed with the move to kits: the central module has one docking port (+X) and an EVA hatch opposite it, and no wing pads (its own solar roof and radiators are counted in its stats: power 1.7, cooling 2.5),
   so the station no longer starts with wings; wings and gas storage need a junction pad. Modules are larger (dock face to dock face 4.2 m for a three-ring module).

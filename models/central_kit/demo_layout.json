@@ -312,7 +312,7 @@
 ]
 },
 {
-"part": "cen_port",
+"part": "cen_eva",
 "loc": [
 0,
 0,
@@ -468,7 +468,7 @@
 ]
 },
 {
-"part": "cen_port",
+"part": "cen_thruster",
 "loc": [
 0,
 0,

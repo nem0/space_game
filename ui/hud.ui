@@ -1222,7 +1222,7 @@
 		[box width=3.2em height=0.1em bg-color=#e8952a margin-top=0.2em margin-bottom=0.7em] {}
 		[box direction=row wrap=false font-size=22 color=#e8952a padding-bottom=0.6em] { [box padding-right=0.9em] { [span text="O R B I T A L"] } [box] { [span text="R E F U G E"] } }
 		[box width=36em padding-bottom=3.6em] { [span font-size=20 color=#9aa6b2 text="The Earth below is dead. One damaged module, two crew, and a few hours of air."] }
-		[box $mn_continue .mitem on-click=menu_continue] { [span color=#6b7682 text="Continue"] }
+		[box $mn_continue .mitem on-click=menu_continue] { [span text="Continue"] }
 		[box $mn_start .mitem on-click=menu_start] { [span text="Start game"] }
 		[box $mn_resume .mitem on-click=menu_start visible=false] { [span text="Resume"] }
 		[box $mn_new .mitem on-click=menu_new visible=false] { [span text="New game"] }

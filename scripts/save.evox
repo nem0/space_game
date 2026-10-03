@@ -1,0 +1,235 @@
+// Savegame: the whole game state in one file (core:storage, "space_game/save.dat" in the user's Saved Games folder).
+// Layout: Header, Scalars, then the record arrays (only the used part of each) and the fixed arrays, all as raw bytes in the order of save().
+// Entities are not stored. load() respawns every module from its kind and seed (modgen is deterministic) and refits the attachments.
+// Bump VERSION whenever a saved struct changes; the header also holds a size fingerprint of them, so an old file is refused instead of misread.
+import "core:world"
+import "core:log"
+import "core:storage" as disk
+import "scripts/defs" as defs
+import "scripts/state" as st
+import "scripts/build" as build
+import "scripts/sim" as sim
+
+comptime MAGIC = 0x53414745;
+comptime VERSION = 1;
+comptime BUFFER_SIZE = 65536;
+
+struct Header {
+	magic : u32;
+	version : u32;
+	fingerprint : i32;
+}
+
+// every plain global of scripts/state.evox that is not an array of records
+struct Scalars {
+	crew : i32;
+	crew_slots : i32;
+	next_name : i32;
+	selected_crew : i32;
+	speed : i32;
+	over : bool;
+	won : bool;
+	o2_timer : f32;
+	food_timer : f32;
+	co2_timer : f32;
+	co2_started : bool;
+	stable_days : f32;
+	boosting : bool;
+	reentered : bool;
+	tech_active : i32;
+	boost_worker : i32;
+	repair_all_left : f32;
+	repair_all_total : f32;
+	repair_all_worker : i32;
+	repair_all_share : f32;
+	eva_hauls : i32;
+	ship_missions : i32;
+	fuel_made : f32;
+	nights_ok : i32;
+	in_eclipse : bool;
+	eclipse_ok : bool;
+	injuries_total : i32;
+	serious_total : i32;
+	treated : i32;
+	nursed : i32;
+	exercised : i32;
+	water_timer : f32;
+	next_contact : f32;
+	next_scrap : f32;
+	module_count : i32;
+	rack_count : i32;
+	attach_count : i32;
+	socket_count : i32;
+	contact_count : i32;
+	mission_count : i32;
+	msg_count : i32;
+}
+
+// st.AttachInst without its entity
+struct SavedAttach {
+	kind : i32;
+	host : i32;
+	slot : i32;
+	roll : i32;
+	hp : f32;
+	task : i32;
+	task_left : f32;
+	task_total : f32;
+	worker : i32;
+}
+
+var buf : [BUFFER_SIZE]u8 = undefined;
+var pos : i32 = 0;
+var attached : [256]SavedAttach = undefined;
+var g_exists : bool = false;   // a save file is there (refresh() checks)
+
+fn path() : []const u8 {
+	return "space_game/save.dat";
+}
+
+fn fingerprint() : i32 {
+	return (sizeof(Scalars) + sizeof(SavedAttach) * 3 + sizeof(st.ModuleInst) * 5 + sizeof(st.RackInst) * 7 + sizeof(st.Socket) * 11
+		+ sizeof(st.CrewMember) * 13 + sizeof(st.Contact) * 17 + sizeof(st.Mission) * 19 + sizeof(st.Res) * 23 + sizeof(st.Msg) * 29) as i32;
+}
+
+fn refresh() : void {
+	g_exists = disk.exists(path());
+}
+
+fn exists() : bool {
+	return g_exists;
+}
+
+fn erase() : void {
+	if disk.exists(path()) { disk.remove(path()); }
+	g_exists = false;
+}
+
+// ---- writing --------------------------------------------------------------------------------------------------------------------------------
+
+// false when the buffer is full
+fn put(src : []u8) : bool {
+	const n = src.length as i32;
+	if pos + n > BUFFER_SIZE { return false; }
+	for i in 0..n { buf[pos + i] = src[i]; }
+	pos += n;
+	return true;
+}
+
+// the expected file size for these counts, so a damaged file is refused before any state is touched
+fn expectedSize(sc : Scalars) : i32 {
+	return (sizeof(Header) + sizeof(Scalars) + sizeof(st.Res)
+		+ sizeof(st.ModuleInst) * sc.module_count + sizeof(st.RackInst) * sc.rack_count + sizeof(SavedAttach) * sc.attach_count
+		+ sizeof(st.Socket) * sc.socket_count + sizeof(st.CrewMember) * sc.crew_slots + sizeof(st.Contact) * sc.contact_count
+		+ sizeof(st.Mission) * sc.mission_count + sizeof(st.Msg) * 6 + 32 * 3 + 32 + 32 * 4) as i32;   // obj_done / obj_trig / obj_claimed and tech_done are one byte each, tech_prog is f32
+}
+
+fn save() : bool {
+	pos = 0;
+	var header = Header { MAGIC, VERSION, fingerprint() };
+	var sc = Scalars {
+		st.crew, st.crew_slots, st.next_name, st.selected_crew, st.speed, st.over, st.won, st.o2_timer, st.food_timer, st.co2_timer, st.co2_started,
+		st.stable_days, st.boosting, st.reentered, st.tech_active, st.boost_worker, st.repair_all_left, st.repair_all_total, st.repair_all_worker,
+		st.repair_all_share, st.eva_hauls, st.ship_missions, st.fuel_made, st.nights_ok, st.in_eclipse, st.eclipse_ok, st.injuries_total,
+		st.serious_total, st.treated, st.nursed, st.exercised, st.water_timer, st.next_contact, st.next_scrap, st.module_count, st.rack_count,
+		st.attach_count, st.socket_count, st.contact_count, st.mission_count, st.msg_count
+	};
+	for i in 0..st.attach_count {
+		const a = st.attachments[i];
+		attached[i] = SavedAttach { a.kind, a.host, a.slot, a.roll, a.hp, a.task, a.task_left, a.task_total, a.worker };
+	}
+	var ok = put((header[:] as []byte) as []u8) and put((sc[:] as []byte) as []u8) and put((st.res[:] as []byte) as []u8);
+	ok = ok and put((st.modules[0:st.module_count] as []byte) as []u8) and put((st.racks[0:st.rack_count] as []byte) as []u8);
+	ok = ok and put((attached[0:st.attach_count] as []byte) as []u8) and put((st.sockets[0:st.socket_count] as []byte) as []u8);
+	ok = ok and put((st.crew_list[0:st.crew_slots] as []byte) as []u8) and put((st.contacts[0:st.contact_count] as []byte) as []u8);
+	ok = ok and put((st.missions[0:st.mission_count] as []byte) as []u8) and put((st.msgs[0:6] as []byte) as []u8);
+	ok = ok and put((st.obj_done[0:32] as []byte) as []u8) and put((st.obj_trig[0:32] as []byte) as []u8) and put((st.obj_claimed[0:32] as []byte) as []u8);
+	ok = ok and put((st.tech_done[0:32] as []byte) as []u8) and put((st.tech_prog[0:32] as []byte) as []u8);
+	if not ok { logError("[game] save: state does not fit the buffer"); return false; }
+	ok = disk.writeBlob(path(), buf[0:pos]);
+	if not ok { logError("[game] save: could not write the file"); return false; }
+	g_exists = true;
+	return true;
+}
+
+// ---- reading --------------------------------------------------------------------------------------------------------------------------------
+
+fn get(dst : []u8) : void {
+	const n = dst.length as i32;
+	for i in 0..n { dst[i] = buf[pos + i]; }
+	pos += n;
+}
+
+fn validScalars(sc : Scalars) : bool {
+	return sc.module_count >= 1 and sc.module_count <= 48 and sc.rack_count >= 0 and sc.rack_count <= 256 and sc.attach_count >= 0 and sc.attach_count <= 256
+		and sc.socket_count >= 0 and sc.socket_count <= 200 and sc.crew_slots >= 0 and sc.crew_slots <= 24 and sc.contact_count >= 0 and sc.contact_count <= 4
+		and sc.mission_count >= 0 and sc.mission_count <= 4 and sc.msg_count >= 0 and sc.msg_count <= 6;
+}
+
+// replaces the running game with the saved one; false (and the game untouched) when the file is missing or does not fit this version
+fn load(world : World) : bool {
+	const size = disk.size(path());
+	if size < sizeof(Header) or size > BUFFER_SIZE { return false; }
+	if disk.readBlob(path(), buf[0:size]) != size { return false; }
+	pos = 0;
+	var header : Header = undefined;
+	get((header[:] as []byte) as []u8);
+	if header.magic != MAGIC or header.version != VERSION or header.fingerprint != fingerprint() { logError("[game] load: save file is from another version"); return false; }
+	var sc : Scalars = undefined;
+	get((sc[:] as []byte) as []u8);
+	if not validScalars(sc) or expectedSize(sc) != size { logError("[game] load: save file is damaged"); return false; }
+
+	build.teardown(world);
+	st.resetResources();
+	get((st.res[:] as []byte) as []u8);
+	get((st.modules[0:sc.module_count] as []byte) as []u8);
+	get((st.racks[0:sc.rack_count] as []byte) as []u8);
+	get((attached[0:sc.attach_count] as []byte) as []u8);
+	get((st.sockets[0:sc.socket_count] as []byte) as []u8);
+	get((st.crew_list[0:sc.crew_slots] as []byte) as []u8);
+	get((st.contacts[0:sc.contact_count] as []byte) as []u8);
+	get((st.missions[0:sc.mission_count] as []byte) as []u8);
+	get((st.msgs[0:6] as []byte) as []u8);
+	get((st.obj_done[0:32] as []byte) as []u8);
+	get((st.obj_trig[0:32] as []byte) as []u8);
+	get((st.obj_claimed[0:32] as []byte) as []u8);
+	get((st.tech_done[0:32] as []byte) as []u8);
+	get((st.tech_prog[0:32] as []byte) as []u8);
+
+	st.crew = sc.crew; st.crew_slots = sc.crew_slots; st.next_name = sc.next_name; st.selected_crew = sc.selected_crew; st.speed = sc.speed;
+	st.over = sc.over; st.won = sc.won; st.o2_timer = sc.o2_timer; st.food_timer = sc.food_timer; st.co2_timer = sc.co2_timer; st.co2_started = sc.co2_started;
+	st.stable_days = sc.stable_days; st.boosting = sc.boosting; st.reentered = sc.reentered; st.tech_active = sc.tech_active; st.boost_worker = sc.boost_worker;
+	st.repair_all_left = sc.repair_all_left; st.repair_all_total = sc.repair_all_total; st.repair_all_worker = sc.repair_all_worker; st.repair_all_share = sc.repair_all_share;
+	st.eva_hauls = sc.eva_hauls; st.ship_missions = sc.ship_missions; st.fuel_made = sc.fuel_made; st.nights_ok = sc.nights_ok;
+	st.in_eclipse = sc.in_eclipse; st.eclipse_ok = sc.eclipse_ok; st.injuries_total = sc.injuries_total; st.serious_total = sc.serious_total;
+	st.treated = sc.treated; st.nursed = sc.nursed; st.exercised = sc.exercised; st.water_timer = sc.water_timer;
+	st.next_contact = sc.next_contact; st.next_scrap = sc.next_scrap;
+	st.module_count = sc.module_count; st.rack_count = sc.rack_count; st.socket_count = sc.socket_count;
+	st.contact_count = sc.contact_count; st.mission_count = sc.mission_count; st.msg_count = sc.msg_count;
+
+	// the 3D side: modules from their seeds, then the attachments, then the hull dressing the racks ask for
+	for i in 0..st.module_count {
+		const m = st.modules[i];
+		const first = build.spawn(world, m.kind, m.pos, m.rot, m.seed);
+		st.modules[i].first_part = first;
+		st.modules[i].part_count = st.part_count - first;
+		st.modules[i].theme = 0;
+		build.g_ship_shown[i] = -1;
+	}
+	for i in 0..sc.attach_count {
+		const a = attached[i];
+		if a.host < 0 or a.host >= st.module_count { continue; }
+		build.spawnAttachment(world, a.kind, a.host, a.slot, a.roll);
+		const k = st.attach_count - 1;
+		st.attachments[k].hp = a.hp;
+		st.attachments[k].task = a.task;
+		st.attachments[k].task_left = a.task_left;
+		st.attachments[k].task_total = a.task_total;
+		st.attachments[k].worker = a.worker;
+		if a.task == st.TASK_BUILD { build.setRoofHidden(a.host, a.slot, a.kind, false); }
+	}
+	for i in 0..st.module_count { build.redress(i); }
+	sim.computeTotals();   // the HUD reads the totals even while the game is paused
+	g_exists = true;
+	return true;
+}
