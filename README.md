@@ -9,7 +9,7 @@ Run: open the project in Lumix Studio and enter game mode (`main.evox` is the en
 - `main.evox` - entry point / frame loop; `scripts/` - `config` (all gameplay tuning), `defs` (module catalog, sockets, math), `state`, `sim` (resource simulation), `build` (placement),
   `orbit` (scene + camera), `station_orbit` (Earth-centered flight frame), `modgen` (assembles every module from the kit parts at random), `objectives`, `hud` (in-game UI), `text` (string buffer helper).
 - `ui/hud.ui` - HUD markup; the other files in `ui/` - its sprites. `gfx/` - Earth, sky and sun shaders, materials and textures. `models/` - generated kit parts (see `models/readme.md`).
-- `tools/` - generators for the models, sprites and HUD (Blender / Python / PowerShell) and Studio preview helpers. `design/` - design docs. `concept_art/` - references only, nothing in the game loads them.
+- `tools/` - generators for the models, sprites and HUD (Blender / Python / PowerShell) and Studio preview helpers. `design/` - design docs.
 - Type-check scripts without the engine: `LumixEngine/external/evox/build/evoxc.exe --typecheck-only --import-dir <project> --core-dir LumixEngine/data/scripts main.evox`.
 
 ## HUD

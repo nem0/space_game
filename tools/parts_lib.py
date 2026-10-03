@@ -1,4 +1,4 @@
-"""Shared code of the damaged parts kits (build_parts_trim.py, build_central_kit.py): everything maps onto the parts sheet (parts_sheet/, make_parts_sheet.py).
+"""Shared code of the damaged parts kits (build_parts_trim.py, build_central_kit.py): everything maps onto the parts sheet (parts_sheet/, texgen/parts.evox).
 Contents: geometry helpers (shell, rev, hbar, patch, faces ...), the hull hardware and
 hull / end pieces of the cylindrical habitat kit, the small attachments, and build_kit() (AO bake + FBX export + parts_trim.mat).
 Hull frame: half cylinders (top half, R = 1.0 m, L = 1.0 m) centred on X; attachments stand on Z = 0."""
@@ -250,7 +250,7 @@ def dock_flange(b):
         hbar(b, [polar(-.525, rad(d0), .81), polar(-.525, rad(d0), .89)] + [polar(-.525, rad(d0 + (d1 - d0)*k/5), .91) for k in range(1, 5)]
                 + [polar(-.525, rad(d1), .89), polar(-.525, rad(d1), .81)], .016, 'PIPE_YELLOW', 6)
 def end_dock(b=None):
-    """docking end (faces -X, x = 0 is the end of the hull), shaped after concept_art/new_style.png: a long plated cone narrows the hull to the neck
+    """docking end (faces -X, x = 0 is the end of the hull), a long plated cone narrows the hull to the neck
     of dock_flange()"""
     b = b or Builder(seed=4); CA, CB = V((-.05, R)), V((-.42, .74))                               # cone from the hull end to the neck, as (x, radius)
     hrev(b, [(R + .05, .0, ''), (R + .05, -.05, 'RIB'), (R, -.05, 'SW_STEEL'), (.74, -.42, 'TANK_WHITE')])
@@ -493,12 +493,12 @@ GAIN = .62          # Material colour < 1: the game sun (intensity 3.5, ACES ton
 MAT = '''shader "/engine/shaders/standard.hlsl"
 backface_culling true
 layer "default"
-texture "/models/parts_sheet/textures/parts_basecolor.png"
-texture "/models/parts_sheet/textures/parts_normal.png"
-texture "/models/parts_sheet/textures/parts_orm.png"
-texture "/models/parts_sheet/textures/parts_orm.png"
-texture "/models/parts_sheet/textures/parts_orm.png"
-texture "/models/parts_sheet/textures/parts_emissive.png"
+texture "/models/parts_sheet/parts_basecolor.ltct"
+texture "/models/parts_sheet/parts_normal.ltct"
+texture "/models/parts_sheet/parts_orm.ltct"
+texture "/models/parts_sheet/parts_orm.ltct"
+texture "/models/parts_sheet/parts_orm.ltct"
+texture "/models/parts_sheet/parts_emissive.ltct"
 uniform "Material color", { %.6f, %.6f, %.6f, 1.000000 }
 uniform "Roughness", 1.000000
 uniform "Metallic", 1.000000
@@ -522,27 +522,13 @@ def patch(b, c, nu, nv, region, out, sub=2, fit=False):
                     b.face([P((i + fa)/nu, (j + fb)/nv) for fa, fb in k], [q(fa, fb) for fa, fb in k], out)
 def build_kit(kit, out):
     """build, AO-bake and export every (name, builder fn) as <out>/<name>.fbx on the parts material; writes <out>/parts_trim.mat.
-    Returns ({name: object}, {name: triangles}, material) - call link_base(mat, True) before a Blender preview render"""
+    Returns ({name: object}, {name: triangles}, material)"""
     out.mkdir(exist_ok=True)
     for o in list(bpy.data.objects): bpy.data.objects.remove(o, do_unlink=True)
     mat = make_material('parts_trim', 'parts', PSHEET / 'textures'); objs = {}; log = {}
     for name, fn in kit:
         ob = make_object(name, fn()); ob.data.materials.append(mat); objs[name] = ob; log[name] = tri_count(ob)
         print('BUILT', name, log[name], round(time.time() - T0, 1), flush=True)
-    link_base(mat, False)
     for name, ob in objs.items(): export_fbx(out / (name + '.fbx'), ob)
     (out / 'parts_trim.mat').write_text(MAT % (GAIN, GAIN, GAIN))
-    link_base(mat, True); return objs, log, mat
-class Demo:
-    """collects placements (Blender coordinates) for the Blender preview and for <out>/demo_layout.json, which tools/gen_parts_demo.py spawns in Studio.
-    `dir` = project-relative folder of a part's FBX when it is not this kit's own"""
-    def __init__(s, objs, out): s.objs = objs; s.out = out; s.items = []
-    def put(s, name, loc, rot_=(0, 0, 0), mesh=None, dir=None):
-        e = {'part': name, 'loc': [round(v, 4) for v in loc], 'rot': [round(v, 5) for v in rot_]}
-        if dir: e['dir'] = dir
-        s.items.append(e); me = s.objs[name].data if name in s.objs else mesh
-        if me is not None:
-            o = bpy.data.objects.new('demo_' + name, me); bpy.context.scene.collection.objects.link(o); o.location = loc; o.rotation_euler = rot_
-    def save(s):
-        for o in s.objs.values(): o.hide_render = True; o.hide_set(True)
-        (s.out / 'demo_layout.json').write_text(json.dumps(s.items, indent=0))
+    return objs, log, mat

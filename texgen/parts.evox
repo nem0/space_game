@@ -1,0 +1,815 @@
+// Shared code of the parts sheet recipes (models/parts_sheet/*.ltct): the 2048 x 2048 atlas of chipped painted hull plates, steel, equipment box faces,
+// pipes and swatches that every kit piece (models/parts, models/central_kit) is mapped onto. The layout (REGION_*) must match parts_layout.json,
+// which the Blender kit builders (tools/trim_lib.py) read.
+// Every texel is computed on its own from its position: surface(x, y) returns albedo, height, roughness, metal, cavity AO and emission together,
+// and the four recipes (base colour, normal, ORM, emissive) each keep the channels they need. There is no drawing state between pixels, so the
+// hull paint is not "drawn and flaked": paint flakes where a noise field and the distance to the plate edge say so.
+import "core:vec3"
+import "core:vec4"
+import "core:texture_recipe"
+import "std:math" as math
+
+const S : u32 = 2048;
+
+// ---- palette (sRGB 0..1) -----------------------------------------------------------------------------------------------------------------------
+const WHITE : Vec3 = Vec3 { 0.7529, 0.7373, 0.6980 };
+const PRIMER : Vec3 = Vec3 { 0.7686, 0.7569, 0.7255 };
+const BARE : Vec3 = Vec3 { 0.5725, 0.5804, 0.5804 };
+const STEEL : Vec3 = Vec3 { 0.7137, 0.7216, 0.7137 };
+const DARK : Vec3 = Vec3 { 0.2118, 0.2235, 0.2353 };
+const SEAM : Vec3 = Vec3 { 0.1961, 0.1961, 0.1882 };
+const RUBBER : Vec3 = Vec3 { 0.1176, 0.1216, 0.1294 };
+const GREEN : Vec3 = Vec3 { 0.4235, 0.4784, 0.3922 };
+const RED : Vec3 = Vec3 { 0.5804, 0.3451, 0.2902 };
+const BLUE : Vec3 = Vec3 { 0.3137, 0.3922, 0.5255 };
+const YELLOW : Vec3 = Vec3 { 0.8000, 0.6196, 0.1569 };
+const CABLE : Vec3 = Vec3 { 0.5961, 0.1804, 0.1490 };
+const DIRT : Vec3 = Vec3 { 0.2902, 0.2431, 0.1882 };
+const GLASS : Vec3 = Vec3 { 0.0549, 0.1020, 0.1412 };
+
+// everything one texel knows about its surface
+struct Surf {
+	a : Vec3;       // albedo
+	h : f32;        // height (arbitrary units, 1 = the plate bevel height)
+	rough : f32;
+	metal : f32;
+	cav : f32;      // cavity darkening, 0..1
+	emi : Vec3;
+	plate : bool;   // painted plate: paint and grime follow its edges
+	edge : f32;     // distance to the plate edge in texels, inside
+	tone : f32;     // per plate brightness
+}
+
+fn newSurf(color : Vec3, rough : f32, metal : f32) : Surf {
+	return Surf { color, 0.0, rough, metal, 1.0, Vec3 { 0, 0, 0 }, false, 99.0, 1.0 };
+}
+
+// ---- small maths -------------------------------------------------------------------------------------------------------------------------------
+fn clamp01(x : f32) : f32 {
+	if x < 0.0 { return 0.0; }
+	if x > 1.0 { return 1.0; }
+	return x;
+}
+
+fn sstep(x : f32) : f32 {
+	const t = clamp01(x);
+	return t * t * (3.0 - 2.0 * t);
+}
+
+fn fmax(a : f32, b : f32) : f32 {
+	if a > b { return a; }
+	return b;
+}
+
+fn fmin(a : f32, b : f32) : f32 {
+	if a < b { return a; }
+	return b;
+}
+
+fn fabs(a : f32) : f32 {
+	if a < 0.0 { return -a; }
+	return a;
+}
+
+fn mulc(c : Vec3, k : f32) : Vec3 {
+	return Vec3 { c.x * k, c.y * k, c.z * k };
+}
+
+fn mix3(a : Vec3, b : Vec3, t : f32) : Vec3 {
+	return Vec3 { a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t, a.z + (b.z - a.z) * t };
+}
+
+// ---- noise -------------------------------------------------------------------------------------------------------------------------------------
+// integer lattice hash, 0..1 (no bit operations in Evox: the same arithmetic hash as the recipe library)
+fn hash(ix : i32, iy : i32, seed : u32) : f32 {
+	var h : u32 = (ix as u32) * 374761393 + (iy as u32) * 668265263 + seed * 2246822519 + 1013904223;
+	h = h * (h * h * 15731 + 789221) + 1376312589;
+	return ((h / 65536) % 65536) as f32 * 0.0000152590219;
+}
+
+// bilinear value noise with lattice cells of sx x sy texels; `wrap` makes it repeat across the 2048 texel sheet width (strips)
+fn vnoise(px : f32, py : f32, sx : f32, sy : f32, seed : u32, wrap : bool) : f32 {
+	var cx = sx;
+	var nx : i32 = 0;
+	if wrap {
+		nx = math.floor(2048.0 / sx + 0.5) as i32;
+		if nx < 1 { nx = 1; }
+		cx = 2048.0 / (nx as f32);
+	}
+	const gx = px / cx;
+	const gy = py / sy;
+	const fx0 = math.floor(gx);
+	const fy0 = math.floor(gy);
+	const fx = gx - fx0;
+	const fy = gy - fy0;
+	var x0 = fx0 as i32;
+	var x1 = x0 + 1;
+	if wrap {
+		x0 = x0 % nx;
+		x1 = x1 % nx;
+	}
+	const y0 = fy0 as i32;
+	const a = hash(x0, y0, seed);
+	const b = hash(x1, y0, seed);
+	const c = hash(x0, y0 + 1, seed);
+	const d = hash(x1, y0 + 1, seed);
+	return (a * (1.0 - fx) + b * fx) * (1.0 - fy) + (c * (1.0 - fx) + d * fx) * fy;
+}
+
+fn fbm(px : f32, py : f32, sy : f32, sx : f32, seed : u32, wrap : bool) : f32 {
+	return 0.55 * vnoise(px, py, sx, sy, seed, wrap)
+		+ 0.30 * vnoise(px, py, fmax(sx * 0.5, 1.0), fmax(sy * 0.5, 1.0), seed + 1, wrap)
+		+ 0.15 * vnoise(px, py, fmax(sx * 0.25, 1.0), fmax(sy * 0.25, 1.0), seed + 2, wrap);
+}
+
+// blobby noise for paint flakes: big patches broken up by small chips
+fn flake(px : f32, py : f32, h : f32, seed : u32, wrap : bool) : f32 {
+	return 0.36 * vnoise(px, py, 26.0, fmin(26.0, h), seed, wrap)
+		+ 0.34 * vnoise(px, py, 9.0, 9.0, seed + 1, wrap)
+		+ 0.30 * vnoise(px, py, 3.0, 3.0, seed + 2, wrap);
+}
+
+// ---- shapes ------------------------------------------------------------------------------------------------------------------------------------
+// signed distance (texels, negative inside) of a rounded rectangle
+fn rrsdf(px : f32, py : f32, x : f32, y : f32, w : f32, h : f32, r : f32) : f32 {
+	const qx = fabs(px - (x + w * 0.5)) - (w * 0.5 - r);
+	const qy = fabs(py - (y + h * 0.5)) - (h * 0.5 - r);
+	const ox = fmax(qx, 0.0);
+	const oy = fmax(qy, 0.0);
+	return math.sqrt(ox * ox + oy * oy) + fmin(fmax(qx, qy), 0.0) - r;
+}
+
+// a raised (height > 0) or sunken plate; track = paint and grime follow its edge
+fn plate(s : *Surf, d : f32, bevel : f32, height : f32, color : Vec3, rough : f32, metal : f32, tone : f32, track : bool) : void {
+	if d >= 0.0 { return; }
+	const prof = sstep(-d / bevel) * height;
+	if height > 0.0 { s.h = fmax(s.h, prof); } else { s.h = s.h + prof; }
+	s.a = mulc(color, tone);
+	s.rough = rough;
+	s.metal = metal;
+	s.cav = s.cav * (0.75 + 0.25 * sstep(-d / (bevel * 1.5)));
+	if track {
+		s.plate = true;
+		s.edge = -d;
+		s.tone = tone;
+	}
+}
+
+// small dome that keeps the paint below it (lighter top, dark ring)
+fn rivet(s : *Surf, px : f32, py : f32, cx : f32, cy : f32, rad : f32, height : f32) : void {
+	const dx = px - cx;
+	const dy = py - cy;
+	if fabs(dx) > rad + 2.0 or fabs(dy) > rad + 2.0 { return; }
+	const d = math.sqrt(dx * dx + dy * dy) - rad;
+	if d < 0.0 {
+		s.h = s.h + height * sstep(-d / 1.5);
+		s.a = mulc(s.a, 1.10);
+	} else if d < 1.6 {
+		s.a = mulc(s.a, 0.58);
+		s.cav = s.cav * 0.6;
+	}
+}
+
+// hex bolt head in its own colour
+fn bolt(s : *Surf, px : f32, py : f32, cx : f32, cy : f32, rad : f32, color : Vec3, height : f32) : void {
+	const dx = fabs(px - cx);
+	const dy = fabs(py - cy);
+	if dx > rad + 3.0 or dy > rad + 3.0 { return; }
+	const d = fmax(dx * 0.866 + dy * 0.5, dy) - rad;
+	if d < 0.0 {
+		s.h = fmax(s.h, 0.0) + height * sstep(-d / 2.0);
+		s.a = mulc(color, 0.85 + 0.3 * sstep(-d / rad));
+		s.rough = 0.42;
+		s.metal = 0.3;
+	} else if d < 2.5 {
+		s.a = mulc(s.a, 0.55);
+		s.cav = s.cav * 0.55;
+	}
+}
+
+// filled disc (or ring of width `ring` when ring > 0)
+fn disc(s : *Surf, px : f32, py : f32, cx : f32, cy : f32, rad : f32, color : Vec3, dh : f32, rough : f32, metal : f32, ring : f32) : void {
+	const dx = px - cx;
+	const dy = py - cy;
+	if fabs(dx) > rad + 1.0 or fabs(dy) > rad + 1.0 { return; }
+	const d = math.sqrt(dx * dx + dy * dy) - rad;
+	if d >= 0.0 { return; }
+	if ring > 0.0 and d <= -ring { return; }
+	s.a = color;
+	s.h = s.h + dh;
+	s.rough = rough;
+	s.metal = metal;
+}
+
+// flat rectangle: optional colour / tint, height offset, roughness
+fn rect(s : *Surf, px : f32, py : f32, x : f32, y : f32, w : f32, h : f32, mul : f32, dh : f32) : void {
+	if px < x or px >= x + w or py < y or py >= y + h { return; }
+	s.a = mulc(s.a, mul);
+	s.cav = s.cav * mul;
+	s.h = s.h + dh;
+}
+
+fn fill(s : *Surf, px : f32, py : f32, x : f32, y : f32, w : f32, h : f32, color : Vec3, dh : f32, rough : f32, metal : f32) : void {
+	if px < x or px >= x + w or py < y or py >= y + h { return; }
+	s.a = color;
+	s.h = s.h + dh;
+	s.rough = rough;
+	s.metal = metal;
+}
+
+// ---- weathering --------------------------------------------------------------------------------------------------------------------------------
+// paint over the plates; the noise value above `thr` has flaked off (mostly along the plate edges) and shows `under` (or what is below when
+// has_under is false), with a feathered rim
+fn paint(s : *Surf, px : f32, py : f32, h : f32, color : Vec3, thr : f32, under : Vec3, has_under : bool, bias : f32, seed : u32, wrap : bool) : void {
+	if not s.plate { return; }
+	const n = flake(px, py, h, seed, wrap) + bias * clamp01(1.0 - s.edge / 16.0);
+	if n > thr {
+		if has_under { s.a = mulc(under, s.tone); }
+		s.h = s.h - 0.05;
+		return;
+	}
+	const col = mulc(color, (1.0 + (fbm(px, py, fmin(64.0, h), 64.0, seed + 7, wrap) - 0.5) * 0.24) * s.tone);
+	if n > thr - 0.03 {
+		s.a = Vec3 { col.x * 0.6 + s.a.x * 0.4, col.y * 0.6 + s.a.y * 0.4, col.z * 0.6 + s.a.z * 0.4 };
+	} else {
+		s.a = col;
+	}
+	s.h = s.h + 0.18;
+	s.rough = 0.62;
+	s.metal = 0.0;
+}
+
+fn grime(s : *Surf, px : f32, py : f32, h : f32, amount : f32, edge : f32, seed : u32, wrap : bool) : void {
+	const g = fbm(px, py, fmin(48.0, h), 48.0, seed, wrap);
+	const st = 0.6 + 0.4 * vnoise(px, py, 5.0, fmin(96.0, h), seed + 3, wrap);
+	const dirt = clamp01((g - 0.40) * 2.2) * amount * st;
+	s.a = Vec3 {
+		s.a.x * (1.0 - dirt * 0.55) + DIRT.x * dirt * 0.16,
+		s.a.y * (1.0 - dirt * 0.55) + DIRT.y * dirt * 0.16,
+		s.a.z * (1.0 - dirt * 0.55) + DIRT.z * dirt * 0.16
+	};
+	s.rough = clamp01(s.rough + dirt * 0.2);
+	if edge > 0.0 and s.plate {
+		s.a = mulc(s.a, (1.0 - edge) + edge * sstep(s.edge / 9.0));
+	}
+}
+
+// one thin scratch per 64 x 64 cell at most: a short line with a random angle and length
+fn scratches(s : *Surf, px : f32, py : f32, alpha : f32, density : f32, seed : u32, color : Vec3) : void {
+	const cx = math.floor(px / 64.0) as i32;
+	const cy = math.floor(py / 64.0) as i32;
+	if hash(cx, cy, seed) > density { return; }
+	const x0 = (cx as f32 + hash(cx, cy, seed + 1)) * 64.0;
+	const y0 = (cy as f32 + hash(cx, cy, seed + 2)) * 64.0;
+	const ang = hash(cx, cy, seed + 3) * 6.2832;
+	const len = 14.0 + hash(cx, cy, seed + 4) * 56.0;
+	const dx = math.cos(ang);
+	const dy = math.sin(ang);
+	const t = (px - x0) * dx + (py - y0) * dy;
+	if t < 0.0 or t > len { return; }
+	const dist = fabs((px - x0) * dy - (py - y0) * dx);
+	if dist > 0.7 { return; }
+	s.a = Vec3 { s.a.x * (1.0 - alpha) + color.x * alpha, s.a.y * (1.0 - alpha) + color.y * alpha, s.a.z * (1.0 - alpha) + color.z * alpha };
+	s.h = s.h - 0.08;
+}
+
+// oil-canning of thin sheet and a little micro roughness
+fn dent(s : *Surf, px : f32, py : f32, h : f32, amp : f32, scale : f32, seed : u32, wrap : bool) : void {
+	s.h = s.h + (fbm(px, py, fmin(scale, h), scale, seed, wrap) - 0.5) * amp;
+}
+
+fn micro(s : *Surf, px : f32, py : f32, seed : u32) : void {
+	s.h = s.h + (vnoise(px, py, 2.0, 2.0, seed, false) - 0.5) * 0.03;
+}
+
+// ---- hull plates -------------------------------------------------------------------------------------------------------------------------------
+// 256 texel (0.5 m) plates in a grid: bare steel under white primer under coloured paint; `thr` is the flake threshold of the colour coat
+fn hullPlates(px : f32, py : f32, w : f32, h : f32, paint_col : Vec3, has_paint : bool, thr : f32, scrap : bool, seed : u32) : Surf {
+	var s = newSurf(SEAM, 0.7, 0.1);
+	const i = math.floor(px / 256.0) as i32;
+	const j = math.floor(py / 256.0) as i32;
+	const lx = px - (i as f32) * 256.0;
+	const ly = py - (j as f32) * 256.0;
+	const cell = (i * 7 + j * 13) as u32 + seed;
+	const tone = 1.0 + (hash(i, j, cell) * 2.0 - 1.0) * 0.07;
+	plate(&s, rrsdf(lx, ly, 3.0, 3.0, 250.0, 250.0, 7.0), 5.0, 1.0, BARE, 0.45, 0.3, tone, true);
+	paint(&s, px, py, h, WHITE, 0.76, BARE, true, 0.28, seed + 10, false);
+	if has_paint { paint(&s, px, py, h, paint_col, thr, BARE, false, 0.5, seed + 20, false); }
+	if scrap {
+		const sel = (i * 2 + j) as i32;
+		var col = GREEN;
+		const m = ((sel % 4) + 4) % 4;
+		if m == 1 { col = RED; } else if m == 2 { col = BLUE; } else if m == 3 { col = YELLOW; }
+		paint(&s, px, py, h, col, 0.55, BARE, false, 0.6, seed + 30, false);
+		const pw = 70.0 + hash(i, j, cell + 3) * 40.0;
+		const ph = 60.0 + hash(i, j, cell + 4) * 40.0;
+		const ox = 40.0 + hash(i, j, cell + 1) * 70.0;
+		const oy = 40.0 + hash(i, j, cell + 2) * 70.0;
+		plate(&s, rrsdf(lx, ly, ox, oy, pw, ph, 5.0), 4.0, 1.6, mulc(WHITE, 0.8 + 0.2 * hash(i, j, cell + 5)), 0.5, 0.1, 1.0, false);
+		rivet(&s, lx, ly, ox + 8.0, oy + 8.0, 3.2, 0.6);
+		rivet(&s, lx, ly, ox + pw - 8.0, oy + 8.0, 3.2, 0.6);
+		rivet(&s, lx, ly, ox + 8.0, oy + ph - 8.0, 3.2, 0.6);
+		rivet(&s, lx, ly, ox + pw - 8.0, oy + ph - 8.0, 3.2, 0.6);
+		rivet(&s, lx, ly, ox + pw * 0.5, oy + 8.0, 3.2, 0.6);
+		rivet(&s, lx, ly, ox + pw * 0.5, oy + ph - 8.0, 3.2, 0.6);
+	}
+	// sub-panel seams
+	const k = math.floor(hash(i, j, cell + 9) * 5.0) as i32;
+	if k == 1 or k == 3 { rect(&s, lx, ly, 6.0, 127.0, 244.0, 2.0, 0.55, -0.4); }
+	if k == 2 or k == 3 {
+		const pick = math.floor(hash(i, j, cell + 8) * 3.0) as i32;
+		var sx : f32 = 127.0;
+		if pick == 1 { sx = 84.0; } else if pick == 2 { sx = 169.0; }
+		rect(&s, lx, ly, sx, 6.0, 2.0, 244.0, 0.55, -0.4);
+	}
+	// rivet rows along the plate edges, every 32 texels
+	if fabs(ly - 13.0) < 5.0 or fabs(ly - 243.0) < 5.0 {
+		var cy : f32 = 13.0;
+		if ly > 128.0 { cy = 243.0; }
+		const cx = 16.0 + 32.0 * math.floor((lx - 16.0) / 32.0 + 0.5);
+		rivet(&s, lx, ly, cx, cy, 3.0, 0.55);
+	}
+	if fabs(lx - 13.0) < 5.0 or fabs(lx - 243.0) < 5.0 {
+		var cx : f32 = 13.0;
+		if lx > 128.0 { cx = 243.0; }
+		const cy = 16.0 + 32.0 * math.floor((ly - 16.0) / 32.0 + 0.5);
+		rivet(&s, lx, ly, cx, cy, 3.0, 0.55);
+	}
+	grime(&s, px, py, h, 0.32, 0.22, seed + 40, false);
+	scratches(&s, px, py, 0.35, 0.9, seed + 50, PRIMER);
+	dent(&s, px, py, h, 1.0, 72.0, seed + 60, false);
+	micro(&s, px, py, seed + 70);
+	return s;
+}
+
+// ---- equipment faces ---------------------------------------------------------------------------------------------------------------------------
+// a box face: a bevelled steel plate under white paint; `thr` is the flake threshold of the paint
+fn boxFace(px : f32, py : f32, thr : f32, seed : u32) : Surf {
+	var s = newSurf(SEAM, 0.7, 0.1);
+	plate(&s, rrsdf(px, py, 2.0, 2.0, 252.0, 252.0, 14.0), 7.0, 1.0, BARE, 0.45, 0.3, 1.0, true);
+	paint(&s, px, py, 256.0, WHITE, thr, BARE, true, 0.7, seed, false);
+	return s;
+}
+
+// four corner bolts, grime, scratches, micro relief
+fn boxFinish(s : *Surf, px : f32, py : f32, w : f32, h : f32, grime_amount : f32, scratch_density : f32, seed : u32) : void {
+	bolt(s, px, py, 22.0, 22.0, 6.0, STEEL, 0.7);
+	bolt(s, px, py, w - 22.0, 22.0, 6.0, STEEL, 0.7);
+	bolt(s, px, py, 22.0, h - 22.0, 6.0, STEEL, 0.7);
+	bolt(s, px, py, w - 22.0, h - 22.0, 6.0, STEEL, 0.7);
+	grime(s, px, py, h, grime_amount, 0.38, seed + 40, false);
+	scratches(s, px, py, 0.3, scratch_density, seed + 50, PRIMER);
+	micro(s, px, py, seed + 70);
+}
+
+// yellow warning label with a dark triangle
+fn label(s : *Surf, px : f32, py : f32, x : f32, y : f32, w : f32, h : f32) : void {
+	if px < x or px >= x + w or py < y or py >= y + h { return; }
+	s.a = mulc(YELLOW, 0.95);
+	s.h = s.h + 0.1;
+	s.rough = 0.55;
+	s.metal = 0.0;
+	const lx = px - x;
+	const ly = py - y;
+	if fabs(lx - w * 0.5) < (ly - 5.0) * 0.62 and ly > 5.0 and ly < h - 5.0 { s.a = mulc(DARK, 0.6); }
+}
+
+fn boxPlain(px : f32, py : f32, seed : u32) : Surf {
+	var s = boxFace(px, py, 0.70, seed);
+	rect(&s, px, py, 30.0, 30.0, 196.0, 2.0, 0.6, -0.4);
+	rect(&s, px, py, 30.0, 224.0, 196.0, 2.0, 0.6, -0.4);
+	rect(&s, px, py, 30.0, 30.0, 2.0, 196.0, 0.6, -0.4);
+	rect(&s, px, py, 224.0, 30.0, 2.0, 196.0, 0.6, -0.4);
+	label(&s, px, py, 44.0, 180.0, 44.0, 30.0);
+	boxFinish(&s, px, py, 256.0, 256.0, 0.45, 0.5, seed);
+	return s;
+}
+
+fn boxVent(px : f32, py : f32, seed : u32) : Surf {
+	var s = boxFace(px, py, 0.70, seed);
+	plate(&s, rrsdf(px, py, 36.0, 52.0, 184.0, 160.0, 8.0), 5.0, -1.0, mulc(DARK, 0.75), 0.7, 0.1, 1.0, false);
+	if py > 60.0 and py < 215.0 {
+		const k = math.floor((py - 60.0) / 17.0);
+		plate(&s, rrsdf(px, py, 44.0, 60.0 + k * 17.0, 168.0, 9.0, 3.0), 3.0, 1.1, mulc(WHITE, 0.92), 0.5, 0.1, 1.0, false);
+	}
+	boxFinish(&s, px, py, 256.0, 256.0, 0.45, 0.5, seed);
+	return s;
+}
+
+fn boxElec(px : f32, py : f32, seed : u32) : Surf {
+	var s = boxFace(px, py, 0.70, seed);
+	plate(&s, rrsdf(px, py, 34.0, 34.0, 188.0, 150.0, 8.0), 4.0, 1.3, mulc(WHITE, 1.02), 0.5, 0.05, 1.0, false);
+	fill(&s, px, py, 30.0, 56.0, 12.0, 22.0, DARK, 0.4, 0.5, 0.3);
+	fill(&s, px, py, 30.0, 150.0, 12.0, 22.0, DARK, 0.4, 0.5, 0.3);
+	plate(&s, rrsdf(px, py, 190.0, 92.0, 14.0, 40.0, 5.0), 3.0, 1.2, DARK, 0.5, 0.3, 1.0, false);
+	label(&s, px, py, 52.0, 58.0, 52.0, 36.0);
+	for k in 0..4 {
+		const cx = 60.0 + (k as f32) * 46.0;
+		disc(&s, px, py, cx, 218.0, 11.0, mulc(DARK, 0.8), -0.5, 0.6, 0.2, 0.0);
+		disc(&s, px, py, cx, 218.0, 14.0, STEEL, 0.3, 0.45, 0.3, 3.0);
+	}
+	boxFinish(&s, px, py, 256.0, 256.0, 0.45, 0.5, seed);
+	// status LEDs
+	ledDot(&s, px, py, 150.0, 62.0, 5.0, Vec3 { 0.1, 1.0, 0.3 });
+	ledDot(&s, px, py, 168.0, 62.0, 5.0, Vec3 { 1.0, 0.45, 0.05 });
+	return s;
+}
+
+// a lit LED: dark ring, bright centre that also glows
+fn ledDot(s : *Surf, px : f32, py : f32, cx : f32, cy : f32, rad : f32, color : Vec3) : void {
+	const dx = px - cx;
+	const dy = py - cy;
+	const d = math.sqrt(dx * dx + dy * dy);
+	if d < rad {
+		s.a = Vec3 { clamp01(color.x * 0.9 + 0.1), clamp01(color.y * 0.9 + 0.1), clamp01(color.z * 0.9 + 0.1) };
+		s.emi = color;
+		s.rough = 0.3;
+		s.metal = 0.0;
+	} else if d < rad + 2.0 {
+		s.a = mulc(DARK, 0.6);
+	}
+}
+
+fn crate(px : f32, py : f32, seed : u32) : Surf {
+	var s = boxFace(px, py, 0.68, seed);
+	plate(&s, rrsdf(px, py, 60.0, 10.0, 20.0, 236.0, 5.0), 4.0, 1.6, mulc(WHITE, 0.94), 0.5, 0.05, 1.0, false);
+	plate(&s, rrsdf(px, py, 168.0, 10.0, 20.0, 236.0, 5.0), 4.0, 1.6, mulc(WHITE, 0.94), 0.5, 0.05, 1.0, false);
+	rect(&s, px, py, 8.0, 127.0, 240.0, 3.0, 0.55, -0.5);
+	plate(&s, rrsdf(px, py, 108.0, 108.0, 40.0, 40.0, 5.0), 4.0, 1.4, STEEL, 0.45, 0.3, 1.0, false);
+	bolt(&s, px, py, 128.0, 128.0, 8.0, DARK, 0.7);
+	boxFinish(&s, px, py, 256.0, 256.0, 0.5, 0.6, seed);
+	return s;
+}
+
+// round hatch with a spoked wheel
+fn hatch(px : f32, py : f32, seed : u32) : Surf {
+	var s = boxFace(px, py, 0.70, seed);
+	const dx = px - 128.0;
+	const dy = py - 128.0;
+	const d = math.sqrt(dx * dx + dy * dy);
+	if d < 92.0 {
+		s.h = s.h + 0.9 * sstep((92.0 - d) / 6.0);
+		s.a = mulc(s.a, 1.04);
+	} else if d < 96.0 {
+		s.a = mulc(s.a, 0.5);
+		s.cav = s.cav * 0.5;
+	}
+	for k in 0..12 {
+		const a = (k as f32) * 0.5236;
+		bolt(&s, px, py, 128.0 + 106.0 * math.cos(a), 128.0 + 106.0 * math.sin(a), 6.0, STEEL, 0.7);
+	}
+	for k in 0..3 {
+		const a = (k as f32) * 1.0472;
+		const t = dx * math.cos(a) + dy * math.sin(a);
+		const dist = fabs(dy * math.cos(a) - dx * math.sin(a));
+		if fabs(t) <= 40.0 and dist <= 2.5 { s.a = DARK; }
+	}
+	disc(&s, px, py, 128.0, 128.0, 44.0, DARK, 0.5, 0.5, 0.3, 6.0);
+	disc(&s, px, py, 128.0, 128.0, 12.0, STEEL, 0.8, 0.45, 0.3, 0.0);
+	plate(&s, rrsdf(px, py, 176.0, 60.0, 16.0, 52.0, 6.0), 3.0, 1.4, YELLOW, 0.5, 0.0, 1.0, false);
+	boxFinish(&s, px, py, 256.0, 256.0, 0.4, 0.5, seed);
+	return s;
+}
+
+fn solar(px : f32, py : f32, seed : u32) : Surf {
+	var s = newSurf(mulc(STEEL, 0.9), 0.45, 0.25);
+	if px >= 8.0 and px < 248.0 and py >= 8.0 and py < 248.0 {
+		const i = math.floor((px - 8.0) / 60.0);
+		const j = math.floor((py - 8.0) / 40.0);
+		const x = 8.0 + i * 60.0;
+		const y = 8.0 + j * 40.0;
+		const tone = 1.0 + (hash(i as i32, j as i32, seed) * 2.0 - 1.0) * 0.10;
+		plate(&s, rrsdf(px, py, x + 2.0, y + 2.0, 56.0, 36.0, 3.0), 2.0, 0.5, Vec3 { 0.1569, 0.2196, 0.4078 }, 0.22, 0.1, tone, false);
+		fill(&s, px, py, x + 20.0, y + 3.0, 1.0, 34.0, Vec3 { 0.5882, 0.6667, 0.8235 }, 0.0, 0.22, 0.1);
+		fill(&s, px, py, x + 38.0, y + 3.0, 1.0, 34.0, Vec3 { 0.5882, 0.6667, 0.8235 }, 0.0, 0.22, 0.1);
+		fill(&s, px, py, x + 3.0, y + 19.0, 54.0, 1.0, Vec3 { 0.4314, 0.5294, 0.7451 }, 0.0, 0.22, 0.1);
+	}
+	grime(&s, px, py, 256.0, 0.3, 0.0, seed + 40, false);
+	scratches(&s, px, py, 0.35, 0.6, seed + 50, Vec3 { 0.6667, 0.7255, 0.8431 });
+	return s;
+}
+
+fn hazard(px : f32, py : f32, seed : u32) : Surf {
+	var s = newSurf(SEAM, 0.7, 0.1);
+	plate(&s, rrsdf(px, py, 2.0, 2.0, 124.0, 124.0, 8.0), 5.0, 1.0, BARE, 0.45, 0.3, 1.0, true);
+	paint(&s, px, py, 128.0, YELLOW, 0.68, BARE, true, 0.7, seed, false);
+	const stripe = (math.floor(px + py) as i32) % 40 < 20;
+	if stripe and s.edge > 6.0 and s.a.z < 0.3 { s.a = mulc(DARK, 0.55); }
+	grime(&s, px, py, 128.0, 0.4, 0.3, seed + 40, false);
+	scratches(&s, px, py, 0.3, 0.4, seed + 50, PRIMER);
+	return s;
+}
+
+fn bracket(px : f32, py : f32, seed : u32) : Surf {
+	var s = newSurf(SEAM, 0.7, 0.1);
+	plate(&s, rrsdf(px, py, 2.0, 2.0, 124.0, 124.0, 10.0), 6.0, 1.0, STEEL, 0.42, 0.3, 1.0, true);
+	bolt(&s, px, py, 30.0, 30.0, 11.0, mulc(STEEL, 0.7), 0.7);
+	bolt(&s, px, py, 98.0, 30.0, 11.0, mulc(STEEL, 0.7), 0.7);
+	bolt(&s, px, py, 30.0, 98.0, 11.0, mulc(STEEL, 0.7), 0.7);
+	bolt(&s, px, py, 98.0, 98.0, 11.0, mulc(STEEL, 0.7), 0.7);
+	rect(&s, px, py, 10.0, 61.0, 108.0, 6.0, 0.62, -0.4);
+	grime(&s, px, py, 128.0, 0.45, 0.35, seed + 40, false);
+	micro(&s, px, py, seed + 70);
+	return s;
+}
+
+fn grille(px : f32, py : f32, seed : u32) : Surf {
+	var s = newSurf(mulc(DARK, 0.7), 0.7, 0.1);
+	if px >= 6.0 and px < 6.0 + 15.0 * 16.4 {
+		const k = math.floor((px - 6.0) / 16.4);
+		plate(&s, rrsdf(px, py, 6.0 + k * 16.4, 8.0, 9.0, 112.0, 3.0), 3.0, 1.0, mulc(WHITE, 0.9), 0.5, 0.1, 1.0, false);
+	}
+	if py < 5.0 or py >= 123.0 { s.a = mulc(WHITE, 0.85); }
+	s.plate = true;
+	s.edge = 99.0;
+	grime(&s, px, py, 128.0, 0.4, 0.0, seed + 40, false);
+	return s;
+}
+
+// ---- swatches ----------------------------------------------------------------------------------------------------------------------------------
+// 64 x 64 solid squares sampled at their centre: k = 0.. in the order of SWATCH in tools/trim_lib.py
+fn swatch(k : i32) : Surf {
+	var s = newSurf(WHITE, 0.55, 0.0);
+	if k == 1 { s = newSurf(STEEL, 0.42, 0.3); }
+	else if k == 2 { s = newSurf(DARK, 0.55, 0.3); }
+	else if k == 3 { s = newSurf(RUBBER, 0.75, 0.0); }
+	else if k == 4 { s = newSurf(YELLOW, 0.55, 0.0); }
+	else if k == 5 { s = newSurf(CABLE, 0.6, 0.0); }
+	else if k == 6 { s = newSurf(BLUE, 0.6, 0.0); }
+	else if k == 7 { s = newSurf(GREEN, 0.6, 0.0); }
+	else if k == 8 { s = newSurf(GLASS, 0.08, 0.0); }
+	else if k == 9 { s = newSurf(Vec3 { 1.0, 0.8431, 0.5882 }, 0.3, 0.0); s.emi = Vec3 { 1.0, 0.62, 0.25 }; }
+	else if k == 10 { s = newSurf(BARE, 0.45, 0.3); }
+	else if k == 11 { s = newSurf(Vec3 { 0.8392, 0.4392, 0.1098 }, 0.5, 0.0); }
+	else if k == 12 { s = newSurf(Vec3 { 0.4706, 0.3765, 0.2431 }, 0.12, 0.0); s.emi = Vec3 { 0.34, 0.22, 0.10 }; }
+	else if k == 13 { s = newSurf(Vec3 { 0.2353, 0.9020, 0.4314 }, 0.3, 0.0); s.emi = Vec3 { 0.08, 1.0, 0.28 }; }
+	else if k == 14 { s = newSurf(Vec3 { 0.9412, 0.1961, 0.1569 }, 0.3, 0.0); s.emi = Vec3 { 1.0, 0.06, 0.04 }; }
+	else if k == 15 { s = newSurf(SEAM, 0.6, 0.0); }   // free slot
+	return s;
+}
+
+// ---- strips ------------------------------------------------------------------------------------------------------------------------------------
+// the strips repeat across the sheet width (noise wraps); ly is the row inside the strip
+
+// brushed streaks along the strip
+fn streak(s : *Surf, px : f32, py : f32, sx : f32, sy : f32, seed : u32) : void {
+	s.a = mulc(s.a, 0.9 + 0.2 * vnoise(px, py, sx, sy, seed, true));
+}
+
+fn stripPlate(h : f32, px : f32, ly : f32, color : Vec3, rough : f32, metal : f32, bevel : f32) : Surf {
+	var s = newSurf(SEAM, 0.7, 0.1);
+	plate(&s, rrsdf(px, ly, -20.0, 1.0, 2088.0, h - 2.0, 2.0), bevel, 1.0, color, rough, metal, 1.0, true);
+	return s;
+}
+
+fn ribStrip(px : f32, ly : f32) : Surf {
+	var s = stripPlate(32.0, px, ly, STEEL, 0.42, 0.3, 5.0);
+	streak(&s, px, ly, 48.0, 1.0, 801);
+	if (math.floor(px) as i32) % 128 < 3 { rect(&s, px, ly, 0.0, 3.0, 3000.0, 26.0, 0.55, -0.4); }
+	grime(&s, px, ly, 32.0, 0.4, 0.35, 810, true);
+	return s;
+}
+
+// for tubes U runs along the tube and V around it: no bevel, only wear, stains and couplers
+fn tubeStrip(px : f32, ly : f32, h : f32, color : Vec3, rough : f32, metal : f32, coupler : Vec3, every : f32, cw : f32, thr : f32, seed : u32) : Surf {
+	var s = newSurf(color, rough, metal);
+	s.plate = true;
+	if thr > 0.0 {
+		s.a = BARE;
+		s.metal = 0.3;
+		paint(&s, px, ly, h, color, thr, BARE, false, 0.0, seed, true);
+	}
+	streak(&s, px, ly, 40.0, 8.0, seed + 90);
+	const n = math.floor((px - every * 0.5) / every + 0.5);
+	const cx = every * 0.5 + n * every;
+	const dx = px - cx;
+	if n >= 0.0 and fabs(dx) < cw * 0.5 + 2.0 {
+		if fabs(dx) < cw * 0.5 { s.a = coupler; s.h = s.h + 0.5; s.rough = 0.45; s.metal = 0.3; }
+		else { s.a = mulc(s.a, 0.6); s.cav = s.cav * 0.6; }
+	}
+	grime(&s, px, ly, h, 0.35, 0.0, seed + 40, true);
+	return s;
+}
+
+fn gasket(px : f32, ly : f32) : Surf {
+	var s = newSurf(RUBBER, 0.75, 0.0);
+	plate(&s, rrsdf(px, ly, -20.0, 8.0, 2088.0, 12.0, 5.0), 4.0, 1.0, mulc(RUBBER, 1.4), 0.7, 0.0, 1.0, true);
+	plate(&s, rrsdf(px, ly, -20.0, 28.0, 2088.0, 12.0, 5.0), 4.0, 1.0, mulc(RUBBER, 1.4), 0.7, 0.0, 1.0, true);
+	return s;
+}
+
+fn dockStrip(px : f32, ly : f32) : Surf {
+	var s = newSurf(SEAM, 0.7, 0.1);
+	const i = math.floor(px / 128.0) as i32;
+	const lx = px - (i as f32) * 128.0;
+	const tone = 1.0 + (hash(i, 3, 901) * 2.0 - 1.0) * 0.06;
+	plate(&s, rrsdf(lx, ly, 2.0, 3.0, 124.0, 122.0, 6.0), 5.0, 1.0, BARE, 0.45, 0.3, tone, true);
+	paint(&s, px, ly, 128.0, WHITE, 0.70, BARE, true, 0.6, 910, true);
+	bolt(&s, lx, ly, 64.0, 22.0, 7.0, STEEL, 0.7);
+	bolt(&s, lx, ly, 64.0, 106.0, 7.0, STEEL, 0.7);
+	rivet(&s, lx, ly, 20.0, 42.0, 3.0, 0.55);
+	rivet(&s, lx, ly, 108.0, 42.0, 3.0, 0.55);
+	rivet(&s, lx, ly, 20.0, 86.0, 3.0, 0.55);
+	rivet(&s, lx, ly, 108.0, 86.0, 3.0, 0.55);
+	grime(&s, px, ly, 128.0, 0.5, 0.36, 940, true);
+	scratches(&s, px, ly, 0.3, 0.9, 950, PRIMER);
+	micro(&s, px, ly, 970);
+	return s;
+}
+
+fn dockDark(px : f32, ly : f32) : Surf {
+	var s = newSurf(DARK, 0.5, 0.3);
+	const light = Vec3 { 0.3608, 0.3765, 0.3922 };
+	plate(&s, rrsdf(px, ly, -20.0, 8.0, 2088.0, 20.0, 5.0), 5.0, 1.0, light, 0.45, 0.3, 1.0, true);
+	plate(&s, rrsdf(px, ly, -20.0, 38.0, 2088.0, 20.0, 5.0), 5.0, 1.0, light, 0.45, 0.3, 1.0, true);
+	plate(&s, rrsdf(px, ly, -20.0, 68.0, 2088.0, 20.0, 5.0), 5.0, 1.0, light, 0.45, 0.3, 1.0, true);
+	const n = math.floor((px - 64.0) / 128.0 + 0.5);
+	if n >= 0.0 { bolt(&s, px, ly, 64.0 + n * 128.0, 48.0, 7.0, STEEL, 0.7); }
+	grime(&s, px, ly, 96.0, 0.4, 0.3, 1000, true);
+	return s;
+}
+
+fn tank(px : f32, ly : f32, paint_col : Vec3, has_paint : bool, seed : u32) : Surf {
+	var s = newSurf(SEAM, 0.7, 0.1);
+	plate(&s, rrsdf(px, ly, -20.0, 2.0, 2088.0, 188.0, 2.0), 4.0, 0.6, BARE, 0.45, 0.3, 1.0, true);
+	paint(&s, px, ly, 192.0, WHITE, 0.74, BARE, true, 0.3, seed, true);
+	if has_paint { paint(&s, px, ly, 192.0, paint_col, 0.60, BARE, false, 0.3, seed + 20, true); }
+	const m = math.fmod(px, 512.0);
+	if m < 3.0 and ly >= 4.0 and ly < 188.0 { s.a = mulc(s.a, 0.55); s.cav = s.cav * 0.55; s.h = s.h - 0.4; }
+	if ly >= 16.0 {
+		const row = 16.0 + 24.0 * math.floor((ly - 16.0) / 24.0 + 0.5);
+		const n = math.floor(px / 512.0 + 0.5);
+		rivet(&s, px, ly, n * 512.0 + 12.0, row, 3.0, 0.55);
+		rivet(&s, px, ly, n * 512.0 - 10.0, row, 3.0, 0.55);
+	}
+	rect(&s, px, ly, 0.0, 48.0, 2048.0, 2.0, 0.7, -0.25);
+	rect(&s, px, ly, 0.0, 144.0, 2048.0, 2.0, 0.7, -0.25);
+	grime(&s, px, ly, 192.0, 0.5, 0.2, seed + 40, true);
+	scratches(&s, px, ly, 0.3, 0.6, seed + 50, PRIMER);
+	dent(&s, px, ly, 192.0, 0.6, 64.0, seed + 60, true);
+	micro(&s, px, ly, seed + 70);
+	return s;
+}
+
+fn beam(px : f32, ly : f32) : Surf {
+	var s = stripPlate(64.0, px, ly, BARE, 0.45, 0.3, 6.0);
+	paint(&s, px, ly, 64.0, WHITE, 0.70, BARE, true, 0.7, 1100, true);
+	const n = math.floor((px - 64.0) / 128.0 + 0.5);
+	if n >= 0.0 { bolt(&s, px, ly, 64.0 + n * 128.0, 32.0, 7.0, STEEL, 0.7); }
+	if (math.floor(px) as i32) % 128 < 2 { rect(&s, px, ly, 0.0, 6.0, 3000.0, 52.0, 0.6, -0.3); }
+	grime(&s, px, ly, 64.0, 0.45, 0.35, 1140, true);
+	micro(&s, px, ly, 1170);
+	return s;
+}
+
+fn flange(px : f32, ly : f32) : Surf {
+	var s = stripPlate(48.0, px, ly, mulc(STEEL, 0.92), 0.4, 0.3, 4.0);
+	streak(&s, px, ly, 40.0, 1.0, 1201);
+	const n = math.floor((px - 32.0) / 64.0 + 0.5);
+	if n >= 0.0 {
+		const cx = 32.0 + n * 64.0;
+		plate(&s, rrsdf(px, ly, cx - 8.0, 20.0, 16.0, 8.0, 4.0), 2.0, -0.5, mulc(DARK, 0.8), 0.6, 0.2, 1.0, false);
+	}
+	if (math.floor(px) as i32) % 128 < 2 { rect(&s, px, ly, 0.0, 4.0, 3000.0, 40.0, 0.6, -0.3); }
+	grime(&s, px, ly, 48.0, 0.4, 0.3, 1240, true);
+	return s;
+}
+
+// ---- the sheet ---------------------------------------------------------------------------------------------------------------------------------
+fn surface(x : u32, y : u32) : Surf {
+	const px = x as f32 + 0.5;
+	const py = y as f32 + 0.5;
+	if y < 512 {
+		if x < 1024 { return hullPlates(px, py, 1024.0, 512.0, WHITE, false, 0.0, false, 100); }
+		if x < 1536 { return hullPlates(px - 1024.0, py, 512.0, 512.0, GREEN, true, 0.70, false, 200); }
+		return hullPlates(px - 1536.0, py, 512.0, 512.0, RED, true, 0.69, false, 300);
+	}
+	if y < 1024 {
+		if x < 512 { return hullPlates(px, py - 512.0, 512.0, 512.0, BLUE, true, 0.70, false, 400); }
+		if x < 1024 { return hullPlates(px - 512.0, py - 512.0, 512.0, 512.0, WHITE, false, 0.0, true, 500); }
+		if x >= 1792 {
+			if y < 768 { return crate(px - 1792.0, py - 512.0, 1600); }
+			const k = ((y - 768) / 64 * 4 + (x - 1792) / 64) as i32;
+			return swatch(k);
+		}
+		if y < 768 {
+			if x < 1280 { return boxPlain(px - 1024.0, py - 512.0, 1300); }
+			if x < 1536 { return boxVent(px - 1280.0, py - 512.0, 1400); }
+			return boxElec(px - 1536.0, py - 512.0, 1500);
+		}
+		if x < 1280 { return hatch(px - 1024.0, py - 768.0, 1700); }
+		if x < 1536 { return solar(px - 1280.0, py - 768.0, 1800); }
+		if y < 896 {
+			if x < 1664 { return hazard(px - 1536.0, py - 768.0, 1900); }
+			return bracket(px - 1664.0, py - 768.0, 2000);
+		}
+		return grille(px - 1536.0, py - 896.0, 2100);
+	}
+	if y >= 1032 and y < 1064 { return ribStrip(px, py - 1032.0); }
+	if y >= 1072 and y < 1104 { return tubeStrip(px, py - 1072.0, 32.0, STEEL, 0.42, 0.3, mulc(STEEL, 0.72), 256.0, 14.0, 0.0, 2200); }
+	if y >= 1112 and y < 1144 { return tubeStrip(px, py - 1112.0, 32.0, YELLOW, 0.55, 0.0, STEEL, 256.0, 16.0, 0.66, 2300); }
+	if y >= 1152 and y < 1184 { return tubeStrip(px, py - 1152.0, 32.0, CABLE, 0.6, 0.0, mulc(DARK, 0.7), 128.0, 8.0, 0.0, 2400); }
+	if y >= 1192 and y < 1224 { return tubeStrip(px, py - 1192.0, 32.0, Vec3 { 0.1961, 0.2039, 0.2196 }, 0.65, 0.0, Vec3 { 0.4706, 0.4784, 0.4863 }, 128.0, 8.0, 0.0, 2500); }
+	if y >= 1232 and y < 1280 { return gasket(px, py - 1232.0); }
+	if y >= 1288 and y < 1416 { return dockStrip(px, py - 1288.0); }
+	if y >= 1424 and y < 1520 { return dockDark(px, py - 1424.0); }
+	if y >= 1528 and y < 1720 { return tank(px, py - 1528.0, BLUE, false, 2600); }
+	if y >= 1728 and y < 1920 { return tank(px, py - 1728.0, BLUE, true, 2700); }
+	if y >= 1928 and y < 1992 { return beam(px, py - 1928.0); }
+	if y >= 1996 and y < 2044 { return flange(px, py - 1996.0); }
+	return newSurf(SEAM, 0.6, 0.0);
+}
+
+// ---- outputs -----------------------------------------------------------------------------------------------------------------------------------
+fn albedoPass(x : u32, y : u32, c : Vec4) : Vec4 {
+	const s = surface(x, y);
+	return Vec4 { clamp01(s.a.x), clamp01(s.a.y), clamp01(s.a.z), 1.0 };
+}
+
+fn baseColor() : Image {
+	var img = create(S, S, 4);
+	map(img, albedoPass);
+	return img;
+}
+
+// height field (one channel); the normal map is its gradient
+struct HeightMap {
+	height : Image;
+}
+
+fn heightPass(x : u32, y : u32, c : Vec4) : Vec4 {
+	const s = surface(x, y);
+	return Vec4 { s.h, 0.0, 0.0, 1.0 };
+}
+
+fn normalPass(x : u32, y : u32, c : Vec4, m : HeightMap) : Vec4 {
+	const ix = x as i32;
+	const iy = y as i32;
+	const dx = samplePixel(m.height, ix + 1, iy, true).x - samplePixel(m.height, ix - 1, iy, true).x;
+	const dy = samplePixel(m.height, ix, iy + 1, true).x - samplePixel(m.height, ix, iy - 1, true).x;
+	const nx = -dx * 3.5;
+	const ny = dy * 3.5;
+	const inv = 1.0 / math.sqrt(nx * nx + ny * ny + 1.0);
+	return Vec4 { nx * inv * 0.5 + 0.5, ny * inv * 0.5 + 0.5, inv * 0.5 + 0.5, 1.0 };
+}
+
+fn normalMap() : Image {
+	var height = create(S, S, 1);
+	map(height, heightPass);
+	var out = create(S, S, 4);
+	mapWith(out, HeightMap { height }, normalPass);
+	return out;
+}
+
+// ORM: R ambient occlusion, G roughness, B metal. The cavity term of the surface is darkened further where the height is below its blurred
+// surroundings (a crease), the blur being done at a quarter of the resolution
+struct OrmMaps {
+	height : Image;
+	blurred : Image;
+}
+
+fn ormPass(x : u32, y : u32, c : Vec4, m : OrmMaps) : Vec4 {
+	const s = surface(x, y);
+	setPixel(m.height, x, y, Vec4 { s.h, 0.0, 0.0, 1.0 });
+	return Vec4 { s.cav, s.rough, s.metal, 1.0 };
+}
+
+fn aoPass(x : u32, y : u32, c : Vec4, m : OrmMaps) : Vec4 {
+	const crease = getPixel(m.blurred, x, y).x - getPixel(m.height, x, y).x;
+	return Vec4 { clamp01(c.x * (1.0 - fmin(fmax(crease * 0.35, 0.0), 0.5))), c.y, c.z, 1.0 };
+}
+
+fn ormMap() : Image {
+	var out = create(S, S, 4);
+	var maps = OrmMaps { create(S, S, 1), create(S, S, 1) };
+	mapWith(out, maps, ormPass);
+	var small = resize(maps.height, 512, 512);
+	blur(small, 3);
+	maps.blurred = resize(small, S, S);
+	mapWith(out, maps, aoPass);
+	return out;
+}
+
+// emission only exists on a few swatches and the status LEDs, so this needs no surface evaluation
+fn emissivePass(x : u32, y : u32, c : Vec4) : Vec4 {
+	if x >= 1792 and y >= 768 and y < 1024 {
+		const k = ((y - 768) / 64 * 4 + (x - 1792) / 64) as i32;
+		const e = swatch(k).emi;
+		return Vec4 { e.x, e.y, e.z, 1.0 };
+	}
+	if x >= 1536 and x < 1792 and y >= 512 and y < 768 {
+		const px = x as f32 + 0.5 - 1536.0;
+		const py = y as f32 + 0.5 - 512.0;
+		const g = math.sqrt((px - 150.0) * (px - 150.0) + (py - 62.0) * (py - 62.0));
+		if g < 5.0 { return Vec4 { 0.1, 1.0, 0.3, 1.0 }; }
+		const o = math.sqrt((px - 168.0) * (px - 168.0) + (py - 62.0) * (py - 62.0));
+		if o < 5.0 { return Vec4 { 1.0, 0.45, 0.05, 1.0 }; }
+	}
+	return Vec4 { 0.0, 0.0, 0.0, 1.0 };
+}
+
+fn emissiveMap() : Image {
+	var out = create(S, S, 4);
+	map(out, emissivePass);
+	return out;
+}

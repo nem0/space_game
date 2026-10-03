@@ -1,0 +1,7 @@
+// emissive map of the parts sheet (texgen/parts.evox)
+import "core:texture_recipe"
+import "texgen/parts" as parts
+
+fn main() : Texture2D {
+	return texture2D(parts.emissiveMap());
+}

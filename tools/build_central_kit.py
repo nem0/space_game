@@ -1,5 +1,5 @@
-"""Modular central module (lens-shaped hub, concept_art/central_new_style.webp) in the damaged parts style, on the parts sheet. Code shared with
-the habitat kit lives in parts_lib.py.   Run after make_parts_sheet.py:   blender --background --python build_central_kit.py
+"""Modular central module (lens-shaped hub) in the damaged parts style, on the parts sheet. Code shared with
+the habitat kit lives in parts_lib.py.   Run:   blender --background --python build_central_kit.py
 The module is a 16-sided lens: a vertical band of 16 facets, a sloping roof and underside of 16 sectors each, and two hubs. Every sector piece is
 built for the facet facing +X with its origin at the MODULE CENTRE, so a piece goes on facet k by placing it at the module origin turned k * 22.5 deg
 about the vertical axis. Any wall facet can be swapped for another wall variant or for a port; roofs and undersides swap the same way.
@@ -158,7 +158,7 @@ def hub_bottom():
     hbar(b, [V((.04, 0, -2.06)), V((.07, .03, -2.3)), V((.05, .02, -2.58))], .009, 'CABLE_RED', 5)
     return b
 
-# ----------------------------------------------------------------------------------------------------------------- build / export / demo
+# ----------------------------------------------------------------------------------------------------------------- build / export
 KIT = [('cen_wall_white', lambda: wall('HULL_WHITE', None, 1)), ('cen_wall_green', lambda: wall('HULL_GREEN', None, 2)), ('cen_wall_red', lambda: wall('HULL_RED', None, 3)),
        ('cen_wall_blue', lambda: wall('HULL_BLUE', None, 4)), ('cen_wall_green_vent', lambda: wall('HULL_GREEN', 'vent', 5)), ('cen_wall_red_vent', lambda: wall('HULL_RED', 'vent', 6)),
        ('cen_wall_blue_vent', lambda: wall('HULL_BLUE', 'vent', 7)), ('cen_wall_porthole', lambda: wall('HULL_WHITE', 'porthole', 8)), ('cen_wall_locker', lambda: wall('HULL_WHITE', 'locker', 9)),
@@ -167,23 +167,4 @@ KIT = [('cen_wall_white', lambda: wall('HULL_WHITE', None, 1)), ('cen_wall_green
        ('cen_hub_top', hub_top), ('cen_hub_bottom', hub_bottom)]
 OBJ, log, mat = build_kit(KIT, OUT)
 
-# demo: one docking port (facet 0) and the EVA hatch (facet 8) opposite; also written to demo_layout.json for tools/gen_parts_demo.py
-demo = Demo(OBJ, OUT)
-WALLS = ['cen_port', 'cen_wall_locker', 'cen_wall_panel', 'cen_wall_red_vent', 'cen_wall_porthole', 'cen_wall_green_vent', 'cen_wall_green', 'cen_wall_locker',
-         'cen_eva', 'cen_wall_panel', 'cen_wall_blue', 'cen_wall_blue_vent', 'cen_thruster', 'cen_wall_scrap', 'cen_wall_red', 'cen_wall_locker']
-ROOFS = {2: 'cen_roof_vent', 6: 'cen_roof_vent', 10: 'cen_roof_vent', 14: 'cen_roof_plain'}
-for k in range(N):
-    a = (0, 0, -k*STEP)                                                                        # facet 4 (porthole) faces -Y, towards the preview camera
-    demo.put(WALLS[k], (0, 0, 0), a); demo.put(ROOFS.get(k, 'cen_roof_solar'), (0, 0, 0), a); demo.put('cen_under', (0, 0, 0), a)
-demo.put('cen_hub_top', (0, 0, 0)); demo.put('cen_hub_bottom', (0, 0, 0))
-PARTS = bpy.data.libraries.load(str(ROOT / 'models/parts/parts_trim.blend'))                   # antenna and dish come from the habitat kit
-with PARTS as (src, dst): dst.meshes = [m for m in src.meshes if m in ('part_antenna', 'part_dish')]
-ext = {m.name: m for m in dst.meshes}
-demo.put('part_antenna', (-.12, .1, 2.02), (0, 0, 0), ext.get('part_antenna'), 'models/parts'); demo.put('part_dish', (.18, -.12, 2.02), (0, 0, -1.2), ext.get('part_dish'), 'models/parts')
-demo.save()
-T.preview(OUT / 'central_kit_preview.png', (0, -12.5, 2.6), 40, (0, 0, -.25), (1600, 900))
-bpy.ops.wm.save_as_mainfile(filepath=str(OUT / 'central_kit.blend'))
-(OUT / 'manifest.json').write_text(json.dumps({'sheet': '../parts_sheet + per-vertex AO (COLOR_0)', 'material': 'parts_trim', 'triangles': log, 'facets': N,
-    'band_apothem': A, 'band_height': 2*ZB, 'port_face_from_centre': PORT_X + .6,
-    'note': 'sector pieces are built for the facet facing +X with the origin at the module centre: place at the module origin, turn k*22.5 deg about the vertical axis'}, indent=1))
 print('CENTRAL KIT DONE', round(time.time() - T0, 1))
