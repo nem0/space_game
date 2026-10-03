@@ -1,5 +1,5 @@
 // Stylised Earth. The colour map (earth.png) gives the large shapes, a splatmap decides which detail texture shows where:
-//  * splatmap (earth_splat.png, made by tools/gen_earth_splat.ps1 from the colour map): R ocean, G land, B ice / cloud, A scorched;
+//  * splatmap (earth_splat.ltct, a texture recipe classifying the colour map): R ocean, G land, B ice / cloud, A scorched;
 //  * four tiling detail textures, one per class, sampled triplanar on the sphere direction (no UV stretching, no pole pinch). Each one is divided
 //    by its own mean colour, so only its variation is applied and an unassigned slot (neutral grey) changes nothing;
 //  * the splatmap also drives roughness (glossy ocean, matte land);

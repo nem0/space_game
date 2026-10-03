@@ -1,0 +1,8 @@
+import "core:texture_recipe"
+import "texgen/glyphs" as g
+
+fn main() : Texture2D {
+	var c = g.icon();
+	g.leafSun(c, g.LEAF);
+	return texture2D(drawFinish(c));
+}

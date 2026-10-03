@@ -3,7 +3,7 @@ backface_culling true
 layer "default"
 texture "/gfx/earth/earth.png"
 texture "/gfx/earth/earth_emissive.png"
-texture "/gfx/earth/earth_splat.png"
+texture "/gfx/earth/earth_splat.ltct"
 texture "/gfx/earth/detail_ocean.png"
 texture "/gfx/earth/detail_land.png"
 texture "/gfx/earth/detail_ice.png"

@@ -3,4 +3,4 @@ top = 0
 bottom = 0
 left = 0
 right = 0
-texture = "ui/flat/menu_none.png"
+texture = "ui/flat/menu_none.ltct"

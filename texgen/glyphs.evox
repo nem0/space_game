@@ -1,0 +1,382 @@
+// HUD icon glyphs drawn on a 24 x 24 grid with the vector drawing functions of core:texture_recipe. Port of the glyph functions of the old tools/gen_icons_flat.py.
+// Every glyph takes the canvas and its main colour; the recipes in ui/icons2/*.ltct pick the glyph and colour.
+import "core:texture_recipe"
+import "core:vec4"
+import "std:math" as math
+
+fn c8(r : u32, g : u32, b : u32) : Vec4 { return recipeRgb(r, g, b); }
+
+const LIGHT : Vec4 = Vec4 { 214.0 / 255, 224.0 / 255, 234.0 / 255, 1 };
+const MUTED : Vec4 = Vec4 { 139.0 / 255, 151.0 / 255, 163.0 / 255, 1 };
+const ORANGE : Vec4 = Vec4 { 232.0 / 255, 149.0 / 255, 42.0 / 255, 1 };
+const AMBER : Vec4 = Vec4 { 1, 176.0 / 255, 46.0 / 255, 1 };
+const RED : Vec4 = Vec4 { 1, 106.0 / 255, 106.0 / 255, 1 };
+const GREEN : Vec4 = Vec4 { 111.0 / 255, 227.0 / 255, 160.0 / 255, 1 };
+const BLUE : Vec4 = Vec4 { 76.0 / 255, 194.0 / 255, 1, 1 };
+const TEAL : Vec4 = Vec4 { 94.0 / 255, 209.0 / 255, 196.0 / 255, 1 };
+const PURPLE : Vec4 = Vec4 { 183.0 / 255, 156.0 / 255, 1, 1 };
+const LEAF : Vec4 = Vec4 { 111.0 / 255, 208.0 / 255, 138.0 / 255, 1 };
+const FLAME : Vec4 = Vec4 { 1, 122.0 / 255, 69.0 / 255, 1 };
+const BLACK : Vec4 = Vec4 { 0, 0, 0, 1 };
+const WHITE : Vec4 = Vec4 { 1, 1, 1, 1 };
+
+// a 96 x 96 icon canvas on the 24 x 24 grid, 3 x 3 supersampling
+fn icon() : DrawCanvas { return drawCanvas(96, 96, 3, 24.0); }
+
+fn rad(deg : f32) : f32 { return deg * math.pi / 180.0; }
+
+fn steel(c : DrawCanvas, col : Vec4) : void {
+	var p = drawPath();
+	pathPoint(&p, 2.5, 19.5); pathPoint(&p, 21.5, 19.5); pathPoint(&p, 18.2, 11.5); pathPoint(&p, 5.8, 11.5);
+	drawPolygon(c, &p, c8(170, 185, 202), 1.0);
+	p.n = 0;
+	pathPoint(&p, 5.8, 11.5); pathPoint(&p, 18.2, 11.5); pathPoint(&p, 16.2, 5.5); pathPoint(&p, 7.8, 5.5);
+	drawPolygon(c, &p, c8(234, 241, 248), 1.0);
+	drawSegment(c, 6.5, 16, 17.5, 16, 1.3, c8(120, 135, 152), 1.0);
+}
+
+fn polymers(c : DrawCanvas, col : Vec4) : void {
+	var p = drawPath();
+	var hx : [6]f32 = undefined;
+	var hy : [6]f32 = undefined;
+	for k in 0..6 {
+		const a = rad(60.0 * k as f32 - 90.0);
+		hx[k] = 12.0 + 6.0 * math.cos(a);
+		hy[k] = 12.0 + 6.0 * math.sin(a);
+		pathPoint(&p, hx[k], hy[k]);
+	}
+	drawLine(c, &p, 1.9, col, 1.0, true);
+	drawDisc(c, hx[0], hy[0], 2.1, col, 1.0);
+	drawDisc(c, hx[2], hy[2], 2.1, col, 1.0);
+	drawDisc(c, hx[4], hy[4], 2.1, col, 1.0);
+}
+
+fn electronics(c : DrawCanvas, col : Vec4) : void {
+	drawRoundedRect(c, 7, 7, 10, 10, 1.6, 1.9, col, 1.0);
+	drawRect(c, 10, 10, 4, 4, col, 1.0);
+	for i in 0..3 {
+		var k : f32 = 9.5;
+		if i == 1 { k = 12.0; }
+		if i == 2 { k = 14.5; }
+		drawSegment(c, k, 3.6, k, 7, 1.5, col, 1.0);
+		drawSegment(c, k, 17, k, 20.4, 1.5, col, 1.0);
+		drawSegment(c, 3.6, k, 7, k, 1.5, col, 1.0);
+		drawSegment(c, 17, k, 20.4, k, 1.5, col, 1.0);
+	}
+}
+
+fn parts(c : DrawCanvas, col : Vec4) : void {
+	for k in 0..8 {
+		const a = rad(45.0 * k as f32);
+		drawSegment(c, 12.0 + 5.0 * math.cos(a), 12.0 + 5.0 * math.sin(a), 12.0 + 8.4 * math.cos(a), 12.0 + 8.4 * math.sin(a), 2.8, col, 1.0);
+	}
+	drawRing(c, 12, 12, 5.4, 2.4, col, 1.0);
+	drawDisc(c, 12, 12, 1.7, col, 1.0);
+}
+
+fn food(c : DrawCanvas, col : Vec4, vein : Vec4) : void {
+	var p = drawPath();
+	pathBezier(&p, 5, 19, 3.5, 8, 12, 3.5, 19.5, 4.5);
+	pathBezier(&p, 19.5, 4.5, 20.5, 12, 12, 20.5, 5, 19);
+	drawPolygon(c, &p, col, 1.0);
+	drawSegment(c, 4.5, 19.5, 14, 10, 1.5, vein, 1.0);
+}
+
+fn oxygen(c : DrawCanvas, col : Vec4) : void {
+	// "O2": a big O and a small subscript 2
+	drawRing(c, 9.2, 11.6, 6.6, 2.4, col, 1.0);
+	var p = drawPath();
+	pathArc(&p, 18.2, 15.4, 2.1, 2.1, 180, 400, 20);
+	pathPoint(&p, 16.1, 21.4); pathPoint(&p, 20.6, 21.4);
+	drawLine(c, &p, 1.7, col, 1.0, false);
+}
+
+fn water(c : DrawCanvas, col : Vec4) : void {
+	var p = drawPath();
+	pathBezier(&p, 12, 2.8, 14.6, 6.8, 19, 10.5, 19, 15);
+	pathArc(&p, 12, 15, 7, 7, 0, 180, 32);
+	pathBezier(&p, 5, 15, 5, 10.5, 9.4, 6.8, 12, 2.8);
+	drawPolygon(c, &p, col, 1.0);
+	p.n = 0;
+	pathArc(&p, 12, 15, 4.2, 4.2, 20, 80, 12);
+	drawLine(c, &p, 1.3, WHITE, 0.55, false);
+}
+
+fn co2(c : DrawCanvas, col : Vec4) : void {
+	// "CO2" like the O2 glyph: C, O and a subscript 2
+	var p = drawPath();
+	pathArc(&p, 5.4, 11.2, 4.4, 4.4, 55, 305, 24);
+	drawLine(c, &p, 2.2, col, 1.0, false);
+	drawRing(c, 15, 11.2, 4.4, 2.2, col, 1.0);
+	p.n = 0;
+	pathArc(&p, 20.8, 16.0, 1.9, 1.9, 180, 400, 20);
+	pathPoint(&p, 18.8, 21.4); pathPoint(&p, 22.8, 21.4);
+	drawLine(c, &p, 1.5, col, 1.0, false);
+}
+
+fn power(c : DrawCanvas, col : Vec4) : void {
+	var p = drawPath();
+	pathPoint(&p, 13.6, 2.4); pathPoint(&p, 5.8, 13.4); pathPoint(&p, 11, 13.4); pathPoint(&p, 9.6, 21.6); pathPoint(&p, 18.2, 10); pathPoint(&p, 12.6, 10);
+	drawPolygon(c, &p, col, 1.0);
+}
+
+fn altitude(c : DrawCanvas, col : Vec4) : void {
+	var p = drawPath();
+	pathArc(&p, 12, 33, 15.5, 15.5, 235, 305, 24);
+	drawLine(c, &p, 1.9, col, 1.0, false);
+	drawSegment(c, 12, 19, 12, 5.2, 2.1, ORANGE, 1.0);
+	p.n = 0;
+	pathPoint(&p, 7.3, 9.8); pathPoint(&p, 12, 5.2); pathPoint(&p, 16.7, 9.8);
+	drawLine(c, &p, 2.1, ORANGE, 1.0, false);
+}
+
+fn crew(c : DrawCanvas, col : Vec4) : void {
+	drawRing(c, 12, 8, 3.5, 2.1, col, 1.0);
+	var p = drawPath();
+	pathArc(&p, 12, 21, 7.6, 7.6, 180, 360, 24);
+	drawLine(c, &p, 2.1, col, 1.0, false);
+}
+
+fn research(c : DrawCanvas, col : Vec4, liquid : Vec4) : void {
+	var p = drawPath();
+	pathPoint(&p, 7.4, 14); pathPoint(&p, 16.6, 14); pathPoint(&p, 19.3, 19.2); pathPoint(&p, 18.4, 20.6); pathPoint(&p, 5.6, 20.6); pathPoint(&p, 4.7, 19.2);
+	drawPolygon(c, &p, liquid, 0.9);
+	p.n = 0;
+	pathPoint(&p, 9.5, 3.2); pathPoint(&p, 9.5, 9); pathPoint(&p, 4.6, 19); pathPoint(&p, 5.6, 21); pathPoint(&p, 18.4, 21); pathPoint(&p, 19.4, 19); pathPoint(&p, 14.5, 9); pathPoint(&p, 14.5, 3.2);
+	drawLine(c, &p, 1.8, col, 1.0, true);
+	drawSegment(c, 8, 3.2, 16, 3.2, 2.0, col, 1.0);
+}
+
+fn fuel(c : DrawCanvas, col : Vec4) : void {
+	var p = drawPath();
+	pathPoint(&p, 12, 2.4); pathPoint(&p, 17.6, 9); pathPoint(&p, 19, 14); pathPoint(&p, 16.6, 19.6); pathPoint(&p, 12, 21.6); pathPoint(&p, 7.4, 19.6); pathPoint(&p, 5, 14); pathPoint(&p, 7.2, 9.4); pathPoint(&p, 9.6, 11.6); pathPoint(&p, 10, 6.4);
+	drawPolygon(c, &p, col, 1.0);
+	p.n = 0;
+	pathPoint(&p, 12, 13); pathPoint(&p, 15.2, 17); pathPoint(&p, 12, 20.2); pathPoint(&p, 8.8, 17);
+	drawPolygon(c, &p, c8(255, 214, 140), 1.0);
+}
+
+fn mixed(c : DrawCanvas, col : Vec4) : void {
+	drawRoundedRect(c, 4, 6, 16, 13, 1.8, 1.9, col, 1.0);
+	drawSegment(c, 4, 12.5, 20, 12.5, 1.7, col, 1.0);
+	drawSegment(c, 12, 6, 12, 19, 1.7, col, 1.0);
+}
+
+fn heat(c : DrawCanvas, col : Vec4) : void {
+	drawRoundedRect(c, 9.4, 2.8, 5.2, 13.2, 2.6, 1.9, col, 1.0);
+	drawRing(c, 12, 17.6, 4.1, 1.9, col, 1.0);
+	drawSegment(c, 12, 9.5, 12, 17.6, 2.2, RED, 1.0);
+	drawDisc(c, 12, 17.6, 2.5, RED, 1.0);
+}
+
+fn battery(c : DrawCanvas, col : Vec4) : void {
+	drawRoundedRect(c, 3.5, 7.6, 15.5, 9, 1.8, 1.9, col, 1.0);
+	drawSegment(c, 20.6, 10.8, 20.6, 13.4, 2.0, col, 1.0);
+	drawRect(c, 6, 10, 3, 4.2, AMBER, 1.0);
+	drawRect(c, 10.5, 10, 3, 4.2, AMBER, 1.0);
+}
+
+fn wrench(c : DrawCanvas, col : Vec4) : void {
+	drawSegment(c, 5.6, 18.4, 13.4, 10.6, 3.2, col, 1.0);
+	drawRing(c, 16.6, 7.4, 3.4, 2.4, col, 1.0);
+	// the original also drew a fully transparent notch here; it has no effect
+}
+
+fn ok(c : DrawCanvas, col : Vec4) : void {
+	drawRing(c, 12, 12, 8.6, 2.0, col, 1.0);
+	var p = drawPath();
+	pathPoint(&p, 7.6, 12.6); pathPoint(&p, 10.8, 15.8); pathPoint(&p, 16.8, 8.8);
+	drawLine(c, &p, 2.2, col, 1.0, false);
+}
+
+fn pause(c : DrawCanvas, col : Vec4) : void {
+	drawRect(c, 6, 5, 4, 14, col, 1.0);
+	drawRect(c, 14, 5, 4, 14, col, 1.0);
+}
+
+fn play(c : DrawCanvas, col : Vec4) : void {
+	var p = drawPath();
+	pathPoint(&p, 7, 5); pathPoint(&p, 19.5, 12); pathPoint(&p, 7, 19);
+	drawPolygon(c, &p, col, 1.0);
+}
+
+fn ff(c : DrawCanvas, col : Vec4) : void {
+	var p = drawPath();
+	pathPoint(&p, 3.5, 6); pathPoint(&p, 12, 12); pathPoint(&p, 3.5, 18);
+	drawPolygon(c, &p, col, 1.0);
+	p.n = 0;
+	pathPoint(&p, 12, 6); pathPoint(&p, 20.5, 12); pathPoint(&p, 12, 18);
+	drawPolygon(c, &p, col, 1.0);
+}
+
+fn fff(c : DrawCanvas, col : Vec4) : void {
+	for i in 0..3 {
+		var x : f32 = 2.5;
+		if i == 1 { x = 9.0; }
+		if i == 2 { x = 15.5; }
+		var p = drawPath();
+		pathPoint(&p, x, 6.5); pathPoint(&p, x + 6.5, 12); pathPoint(&p, x, 17.5);
+		drawPolygon(c, &p, col, 1.0);
+	}
+}
+
+// ---- rack and attachment thumbnails -----------------------------------------------------------------------------------------------------
+
+fn bed(c : DrawCanvas, col : Vec4) : void {
+	drawRect(c, 3.5, 15, 17, 2.4, col, 1.0);
+	drawRect(c, 3.5, 7, 2.2, 13, col, 1.0);
+	drawRect(c, 18.3, 12, 2.2, 8, col, 1.0);
+	drawRoundedRect(c, 7, 10.4, 6, 3.6, 1.6, 1.8, BLUE, 1.0);
+	drawRect(c, 13.5, 12.2, 5, 2.4, col, 0.55);
+}
+
+fn snowflake(c : DrawCanvas, col : Vec4) : void {
+	for k in 0..3 {
+		const a = rad(60.0 * k as f32 + 90.0);
+		const dx = 8.6 * math.cos(a);
+		const dy = 8.6 * math.sin(a);
+		drawSegment(c, 12.0 - dx, 12.0 - dy, 12.0 + dx, 12.0 + dy, 1.9, col, 1.0);
+		for si in 0..2 {
+			for ei in 0..2 {
+				var s : f32 = -1.0;
+				if si == 1 { s = 1.0; }
+				var e : f32 = 1.0;
+				if ei == 1 { e = -1.0; }
+				const bx = 12.0 + e * 5.2 * math.cos(a);
+				const by = 12.0 + e * 5.2 * math.sin(a);
+				const b = a + s * rad(50.0);
+				drawSegment(c, bx, by, bx + e * 2.6 * math.cos(b), by + e * 2.6 * math.sin(b), 1.5, col, 1.0);
+			}
+		}
+	}
+}
+
+fn cross(c : DrawCanvas, col : Vec4) : void {
+	drawRoundedRect(c, 3.5, 3.5, 17, 17, 3, 1.9, LIGHT, 0.55);
+	drawRect(c, 10.3, 6, 3.4, 12, col, 1.0);
+	drawRect(c, 6, 10.3, 12, 3.4, col, 1.0);
+}
+
+fn dumbbell(c : DrawCanvas, col : Vec4) : void {
+	drawSegment(c, 7, 12, 17, 12, 2.2, col, 1.0);
+	drawSegment(c, 4.6, 7, 4.6, 17, 3.2, ORANGE, 1.0);
+	drawSegment(c, 19.4, 7, 19.4, 17, 3.2, ORANGE, 1.0);
+	drawSegment(c, 7.2, 8.4, 7.2, 15.6, 3.0, col, 1.0);
+	drawSegment(c, 16.8, 8.4, 16.8, 15.6, 3.0, col, 1.0);
+}
+
+fn recycle(c : DrawCanvas, col : Vec4) : void {
+	for k in 0..3 {
+		var a0 : f32 = 200.0;
+		if k == 1 { a0 = 320.0; }
+		if k == 2 { a0 = 80.0; }
+		var p = drawPath();
+		pathArc(&p, 12, 12, 7, 7, a0, a0 + 80.0, 16);
+		drawLine(c, &p, 2.3, col, 1.0, false);
+		// arrow head at the end of the arc, pointing along its last segment
+		const x = p.x[15];
+		const y = p.y[15];
+		const d = math.atan2(y - p.y[14], x - p.x[14]);
+		var h = drawPath();
+		pathPoint(&h, x + 3.0 * math.cos(d), y + 3.0 * math.sin(d));
+		pathPoint(&h, x + 2.2 * math.cos(d + 2.2), y + 2.2 * math.sin(d + 2.2));
+		pathPoint(&h, x + 2.2 * math.cos(d - 2.2), y + 2.2 * math.sin(d - 2.2));
+		drawPolygon(c, &h, col, 1.0);
+	}
+}
+
+fn solar(c : DrawCanvas, col : Vec4) : void {
+	var p = drawPath();
+	pathPoint(&p, 5.5, 6); pathPoint(&p, 20, 6); pathPoint(&p, 18.5, 17); pathPoint(&p, 4, 17);
+	drawPolygon(c, &p, col, 0.28);
+	drawLine(c, &p, 1.8, col, 1.0, true);
+	for i in 0..2 {
+		var t : f32 = 1.0 / 3.0;
+		if i == 1 { t = 2.0 / 3.0; }
+		drawSegment(c, 5.5 - 1.5 * t, 6.0 + 11.0 * t, 20.0 - 1.5 * t, 6.0 + 11.0 * t, 1.3, col, 1.0);
+		drawSegment(c, 5.5 + 14.5 * t, 6, 4.0 + 14.5 * t, 17, 1.3, col, 1.0);
+	}
+	drawSegment(c, 11.5, 17, 11.5, 21, 1.9, LIGHT, 1.0);
+	drawSegment(c, 8, 21, 15, 21, 1.9, LIGHT, 1.0);
+}
+
+fn vent(c : DrawCanvas, col : Vec4) : void {
+	drawRoundedRect(c, 4, 5, 16, 14, 2, 1.9, col, 1.0);
+	drawSegment(c, 7, 8.5, 17, 8.5, 1.7, ORANGE, 1.0);
+	drawSegment(c, 7, 12, 17, 12, 1.7, ORANGE, 1.0);
+	drawSegment(c, 7, 15.5, 17, 15.5, 1.7, ORANGE, 1.0);
+}
+
+fn tank(c : DrawCanvas, col : Vec4) : void {
+	drawRoundedRect(c, 3.5, 7, 17, 10, 4.6, 1.9, LIGHT, 1.0);
+	drawRect(c, 8.4, 7.9, 1.4, 8.2, col, 1.0);
+	drawRect(c, 14.2, 7.9, 1.4, 8.2, col, 1.0);
+	drawSegment(c, 20.5, 12, 22.2, 12, 2.0, LIGHT, 1.0);
+}
+
+fn lamp(c : DrawCanvas, col : Vec4) : void {
+	drawDisc(c, 12, 10, 5.4, col, 0.35);
+	drawRing(c, 12, 10, 5.4, 1.9, col, 1.0);
+	drawRect(c, 9.6, 16, 4.8, 2.4, LIGHT, 1.0);
+	drawRect(c, 10.4, 19, 3.2, 1.6, LIGHT, 1.0);
+	for i in 0..5 {
+		const t = rad(-60.0 + 30.0 * i as f32 - 90.0);
+		drawSegment(c, 12.0 + 7.8 * math.cos(t), 10.0 + 7.8 * math.sin(t), 12.0 + 9.8 * math.cos(t), 10.0 + 9.8 * math.sin(t), 1.3, col, 1.0);
+	}
+}
+
+fn antenna(c : DrawCanvas, col : Vec4) : void {
+	drawSegment(c, 12, 9, 12, 21, 2.0, col, 1.0);
+	drawSegment(c, 8, 21, 16, 21, 2.0, col, 1.0);
+	drawDisc(c, 12, 8, 1.8, ORANGE, 1.0);
+	for i in 0..2 {
+		var r : f32 = 4.5;
+		if i == 1 { r = 7.5; }
+		var p = drawPath();
+		pathArc(&p, 12, 8, r, r, -150, -30, 12);
+		drawLine(c, &p, 1.6, ORANGE, 1.0, false);
+		// the original's lower arcs were drawn with alpha 0 (invisible)
+	}
+}
+
+fn dish(c : DrawCanvas, col : Vec4) : void {
+	var p = drawPath();
+	pathArc(&p, 11, 8, 8, 8, 20, 160, 20);
+	drawLine(c, &p, 2.2, col, 1.0, false);
+	drawSegment(c, 11, 12, 11, 21, 2.0, col, 1.0);
+	drawSegment(c, 7.5, 21, 14.5, 21, 2.0, col, 1.0);
+	drawSegment(c, 11, 8, 17.5, 3.5, 1.6, ORANGE, 1.0);
+	drawDisc(c, 17.8, 3.3, 1.5, ORANGE, 1.0);
+}
+
+fn radar(c : DrawCanvas, col : Vec4) : void {
+	drawRing(c, 12, 12, 8.6, 1.8, col, 0.8);
+	drawRing(c, 12, 12, 4.6, 1.5, col, 0.5);
+	var p = drawPath();
+	pathPoint(&p, 12, 12);
+	pathPoint(&p, 12.0 + 8.6 * math.cos(rad(-80.0)), 12.0 + 8.6 * math.sin(rad(-80.0)));
+	pathPoint(&p, 12.0 + 8.6 * math.cos(rad(-20.0)), 12.0 + 8.6 * math.sin(rad(-20.0)));
+	drawPolygon(c, &p, col, 0.35);
+	drawDisc(c, 12, 12, 1.4, col, 1.0);
+	drawDisc(c, 16.4, 15.5, 1.2, ORANGE, 1.0);
+}
+
+fn leafSun(c : DrawCanvas, col : Vec4) : void {
+	food(c, col, c8(8, 14, 20));
+	drawRing(c, 18.5, 5, 2.2, 1.6, AMBER, 1.0);
+}
+
+fn rtg(c : DrawCanvas, col : Vec4) : void {
+	drawRoundedRect(c, 5, 8, 14, 9, 2, 1.9, LIGHT, 1.0);
+	for k in 0..3 {
+		const a = rad(90.0 + 120.0 * k as f32);
+		var p = drawPath();
+		pathPoint(&p, 12.5, 12.5);
+		pathPoint(&p, 12.5 + 3.6 * math.cos(a - 0.5), 12.5 - 3.6 * math.sin(a - 0.5));
+		pathPoint(&p, 12.5 + 3.6 * math.cos(a + 0.5), 12.5 - 3.6 * math.sin(a + 0.5));
+		drawPolygon(c, &p, col, 1.0);
+	}
+	drawDisc(c, 12.5, 12.5, 1.0, LIGHT, 1.0);
+	drawSegment(c, 12, 17, 12, 21, 1.9, LIGHT, 1.0);
+	drawSegment(c, 8, 21, 16, 21, 1.9, LIGHT, 1.0);
+}

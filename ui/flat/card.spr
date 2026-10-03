@@ -3,4 +3,4 @@ top = 9
 bottom = 31
 left = 9
 right = 31
-texture = "ui/flat/card.png"
+texture = "ui/flat/card.ltct"

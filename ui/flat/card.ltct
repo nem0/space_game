@@ -1,0 +1,11 @@
+import "core:texture_recipe"
+import "texgen/sprite" as spr
+
+fn main() : Texture2D {
+	var s = spr.base(40, 6.0, spr.col(7, 12, 18, 0.97),
+		spr.col(255, 255, 255, 0.14));
+	s.fill2 = spr.col(5, 9, 14, 0.97);
+	s.gradient = true;
+	return texture2D(spr.render(s));
+}
+

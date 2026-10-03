@@ -1,0 +1,88 @@
+// Classifies earth.png (+ earth_emissive.png) into a splatmap (same size, linear):
+//   R ocean   G land   B ice / cloud   A scorched (burning ground: the emissive map is bright)   -- the four channels sum to ~1
+// The shader (gfx/earth.hlsl) uses it to pick which detail texture shows where. Replaces the old tools/gen_earth_splat.ps1.
+import "core:texture_recipe"
+import "core:vec4"
+import "std:math" as math
+
+fn smooth(a : f32, b : f32, x : f32) : f32 {
+	const t = recipeClamp((x - a) / (b - a));
+	return t * t * (3.0 - 2.0 * t);
+}
+
+struct Maps {
+	emissive : Image;
+}
+
+// classification is done on the sRGB values
+fn classify(x : u32, y : u32, color : Vec4, maps : Maps) : Vec4 {
+	const e = getPixel(maps.emissive, x, y);
+	const r = color.x;
+	const g = color.y;
+	const b = color.z;
+	const lum = 0.3 * r + 0.59 * g + 0.11 * b;
+	const mx = math.max(r, math.max(g, b));
+	const mn = math.min(r, math.min(g, b));
+	const sat = mx - mn;
+	const fire = smooth(0.25, 0.6, math.max(e.x, math.max(e.y, e.z)));
+	const warm = r - b;   // ocean is cool (blue >= red); land, smoke and desert are warm
+	const ice = smooth(0.42, 0.58, lum) * (1.0 - smooth(0.18, 0.30, sat));
+	const ocean = (1.0 - ice) * (1.0 - smooth(-0.01, 0.04, warm)) * (1.0 - smooth(0.30, 0.45, lum));
+	const burnt = fire * (1.0 - ice);
+	var land = math.max(1.0 - ice - ocean - burnt, 0);
+	var s = ice + ocean + burnt + land;
+	if s < 0.0001 {
+		land = 1.0;
+		s = 1.0;
+	}
+	return Vec4 { ocean / s, land / s, ice / s, burnt / s };
+}
+
+// 5-tap box blur along x (wrapping, the map is a full longitude) or along y (clamped at the poles)
+fn blurX(src : Image, dst : Image) : void {
+	const w = src.width as i32;
+	for y in 0..src.height {
+		for x in 0..src.width {
+			var sum = Vec4 { 0, 0, 0, 0 };
+			for d in 0..5 {
+				sum = sum + getPixel(src, ((x as i32 + d as i32 - 2 + w) % w) as u32, y);
+			}
+			setPixel(dst, x, y, sum / 5.0);
+		}
+	}
+}
+
+fn blurY(src : Image, dst : Image) : void {
+	const last = src.height as i32 - 1;
+	for y in 0..src.height {
+		for x in 0..src.width {
+			var sum = Vec4 { 0, 0, 0, 0 };
+			for d in 0..5 {
+				var yy = y as i32 + d as i32 - 2;
+				if yy < 0 { yy = 0; }
+				if yy > last { yy = last; }
+				sum = sum + getPixel(src, x, yy as u32);
+			}
+			setPixel(dst, x, y, sum / 5.0);
+		}
+	}
+}
+
+fn main() : Texture2D {
+	const earth = load("gfx/earth/earth.png");
+	const emissive = load("gfx/earth/earth_emissive.png");
+	var splat = create(earth.width, earth.height, 4);
+	for y in 0..earth.height {
+		for x in 0..earth.width {
+			setPixel(splat, x, y, classify(x, y, getPixel(earth, x, y), Maps { emissive }));
+		}
+	}
+	// two passes so the class borders are soft when the map is magnified
+	var scratch = create(earth.width, earth.height, 4);
+	for pass in 0..2 {
+		blurX(splat, scratch);
+		blurY(scratch, splat);
+	}
+	return texture2D(splat);
+}
+

@@ -1,0 +1,9 @@
+import "core:texture_recipe"
+import "texgen/sprite" as spr
+
+fn main() : Texture2D {
+	return texture2D(spr.strip(256, 4, spr.col(232, 149, 42, 1.0),
+		0.3, 0.0, 0.0, 1.0,
+		spr.col(232, 149, 42, 1.0), true));
+}
+

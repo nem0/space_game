@@ -1,0 +1,11 @@
+import "core:texture_recipe"
+import "texgen/sprite" as spr
+
+fn main() : Texture2D {
+	var s = spr.base(32, 6.0, spr.col(8, 14, 20, 0.94),
+		spr.col(58, 154, 217, 0.55));
+	s.bar = spr.col(58, 154, 217, 1.0);
+	s.bar_w = 3.5;
+	return texture2D(spr.render(s));
+}
+

@@ -1,0 +1,101 @@
+// Shared drawing code for the flat HUD skin recipes (ui/flat/*.ltct): rounded-rectangle nine-slice sprites and horizontal gradient strips.
+// Every pixel is supersampled SS x SS times against a rounded-box distance field, layers are painted in the order fill, bar, inner line, border
+// (a later layer replaces an earlier one), and the premultiplied result is converted back to straight alpha.
+import "core:texture_recipe"
+import "core:vec4"
+import "std:math" as math
+
+const SS : u32 = 4;
+
+// colour from 0..255 channels and an alpha in 0..1 (stored straight, x y z = rgb in 0..1, w = alpha)
+fn col(r : u32, g : u32, b : u32, a : f32) : Vec4 {
+	return Vec4 { r as f32 / 255, g as f32 / 255, b as f32 / 255, a };
+}
+
+struct Sprite {
+	size : u32;
+	radius : f32;
+	border_w : f32;
+	fill : Vec4;
+	fill2 : Vec4;        // colour at the bottom, used when gradient is true
+	gradient : bool;
+	border : Vec4;
+	bar : Vec4;          // vertical bar along the left edge, used when bar_w > 0
+	bar_w : f32;
+	inner : Vec4;        // second line inside the border, used when inner_w > 0
+	inner_w : f32;
+}
+
+fn base(size : u32, radius : f32, fill : Vec4, border : Vec4) : Sprite {
+	const none = Vec4 { 0, 0, 0, 0 };
+	return Sprite { size, radius, 1.0, fill, none, false, border, none, 0.0, none, 0.0 };
+}
+
+fn premultiplied(c : Vec4) : Vec4 {
+	return Vec4 { c.x * c.w, c.y * c.w, c.z * c.w, c.w };
+}
+
+fn shadePixel(x : u32, y : u32, value : Vec4, s : Sprite) : Vec4 {
+	var sum = Vec4 { 0, 0, 0, 0 };
+	const size = s.size as f32;
+	const half = size * 0.5;
+	for j in 0..SS {
+		for i in 0..SS {
+			const px = x as f32 + (i as f32 + 0.5) / SS as f32;
+			const py = y as f32 + (j as f32 + 0.5) / SS as f32;
+			const qx = math.abs(px - half) - (half - s.radius);
+			const qy = math.abs(py - half) - (half - s.radius);
+			const ox = math.max(qx, 0);
+			const oy = math.max(qy, 0);
+			const sdf = math.sqrt(ox * ox + oy * oy) + math.min(math.max(qx, qy), 0) - s.radius;
+			if sdf <= 0 {
+				var c = s.fill;
+				if s.gradient {
+					const t = py / size;
+					c = s.fill * (1 - t) + s.fill2 * t;
+				}
+				var p = premultiplied(c);
+				if s.bar_w > 0 and px < s.bar_w { p = premultiplied(s.bar); }
+				if s.inner_w > 0 and sdf > -s.border_w - s.inner_w and sdf <= -s.border_w { p = premultiplied(s.inner); }
+				if sdf > -s.border_w { p = premultiplied(s.border); }
+				sum = sum + p;
+			}
+		}
+	}
+	sum = sum / (SS * SS) as f32;
+	if sum.w > 0.000001 { return Vec4 { sum.x / sum.w, sum.y / sum.w, sum.z / sum.w, sum.w }; }
+	return Vec4 { 0, 0, 0, 0 };
+}
+
+fn render(s : Sprite) : Image {
+	var image = create(s.size, s.size, 4);
+	mapWith(image, s, shadePixel);
+	return image;
+}
+
+struct Strip {
+	rgb : Vec4;
+	a0 : f32;
+	a1 : f32;
+	hold : f32;
+	stop : f32;
+	bar : Vec4;
+	has_bar : bool;
+	width : u32;
+}
+
+fn stripPixel(x : u32, y : u32, value : Vec4, s : Strip) : Vec4 {
+	if s.has_bar and x < 3 { return Vec4 { s.bar.x, s.bar.y, s.bar.z, 1 }; }
+	var t : f32 = 0.0;
+	if s.width > 1 { t = x as f32 / (s.width - 1) as f32; }
+	t = recipeClamp((t - s.hold) / (s.stop - s.hold));
+	const a = s.a0 + (s.a1 - s.a0) * (t * t * (3 - 2 * t));
+	return Vec4 { s.rgb.x, s.rgb.y, s.rgb.z, a };
+}
+
+// horizontal alpha ramp: constant colour, alpha a0 up to `hold`, smoothstep to a1 at `stop`; optional 3 px solid bar on the left
+fn strip(width : u32, height : u32, rgb : Vec4, a0 : f32, a1 : f32, hold : f32, stop : f32, bar : Vec4, has_bar : bool) : Image {
+	var image = create(width, height, 4);
+	mapWith(image, Strip { rgb, a0, a1, hold, stop, bar, has_bar, width }, stripPixel);
+	return image;
+}

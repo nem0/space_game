@@ -2,7 +2,7 @@ shader "/gfx/earth_clouds.hlsl"
 backface_culling true
 layer "default"
 define "ALPHA_CUTOUT"
-texture "/gfx/earth/earth_splat.png"
+texture "/gfx/earth/earth_splat.ltct"
 uniform "Planet radius", 3000.000000
 uniform "Map warp", 3.500000
 uniform "Map sharpness", 0.450000
