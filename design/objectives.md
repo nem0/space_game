@@ -102,12 +102,12 @@ Left open on purpose. After the first mission the game opens up to the broad des
 
 ## Implementation status
 
-Implemented in `scripts/config.evox`, `scripts/objectives.evox` (the chain and its triggers), `scripts/sim.evox`, `scripts/state.evox`, `scripts/hud.evox` and `tools/gen_hud.py` (OBJECTIVES tab, water, the new tech tree). Deviations and tuning choices:
+Implemented in `scripts/config.evox`, `scripts/objectives.evox` (the chain and its triggers), `scripts/sim.evox`, `scripts/state.evox`, `scripts/hud.evox` and `ui/hud.ui` (OBJECTIVES tab, water, the new tech tree). Deviations and tuning choices:
 
 - **Start state:** altitude 360 km, fuel 160 kg, water 160 L (no recycling), the Central Module at 50% HP, and a starter stock of 90 steel, 36 polymers, 40 electronics and 20 machine parts (`START_*`), plus an O₂ generator rack on the Central Module (at 50% HP its own oxygen is not enough for two crew). The stock repairs the module to about 95%; the last few kg for "fixed" (HP ≥ 99%) come from dismantling something (the small solar panel is the cheap choice). Playtested: the unattended CO₂ reaches 12,000 ppm in 10 h; a repair started at once peaks near 12,500 ppm and the crew survive. Repairs take 6 min per kg (was 10).
 - **Night:** solar power (attachments and solar wings) is zero in Earth's shadow, about 39% of each orbit. The radioisotope generator (+5 kW, an attachment, preinstalled on the Central roof) keeps running. Objective #5 counts an eclipse passed on batteries with no brownout.
 - **Sorting:** with no workshop bench anywhere the crew hand-sort salvage at 10 kg/h. Once a workshop bench exists it must be staffed.
 - **EVA:** the existing "nearby scrap" run is the EVA haul (#4). It brings a little water and 2–8 kg of fuel; debris and asteroid missions bring more water.
 - **Injuries:** 4% per crew member per day, 12% after a mission (35% after a failed one), a quarter of them serious. The Medical Bay is not a separate rack: it is a working medical rack once *Medical Bay* is researched. The caregiver is assigned automatically (an idle crew member).
-- **Techs:** 29 technologies (the original 20 plus water recycling, first aid, medical bay, exercise machine, solar arrays, workshop, radar, shuttle, fuel production). *Medical Training* now only speeds fitness recovery. Racks 13 (water recycler) and 14 (fuel producer) reuse placeholder card sprites (`ui/kit/rth_13.spr`, `rth_14.spr`).
+- **Techs:** 29 technologies (the original 20 plus water recycling, first aid, medical bay, exercise machine, solar arrays, workshop, radar, shuttle, fuel production). *Medical Training* now only speeds fitness recovery. Racks 13 (water recycler) and 14 (fuel producer) reuse placeholder card sprites (`ui/rth_13.spr`, `rth_14.spr`).
 - **Not done:** the late game (open); water use by hydroponics and by the fuel producer's heat; sprites for the new racks.

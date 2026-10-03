@@ -1,4 +1,4 @@
-// Shared drawing code for the flat HUD skin recipes (ui/flat/*.ltct): rounded-rectangle nine-slice sprites and horizontal gradient strips.
+// Shared drawing code for the flat HUD skin recipes (ui/*.ltct): rounded-rectangle nine-slice sprites and horizontal gradient strips.
 // Every pixel is supersampled SS x SS times against a rounded-box distance field, layers are painted in the order fill, bar, inner line, border
 // (a later layer replaces an earlier one), and the premultiplied result is converted back to straight alpha.
 import "core:texture_recipe"

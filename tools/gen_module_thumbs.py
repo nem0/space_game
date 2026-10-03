@@ -1,5 +1,5 @@
 """Renders build-card thumbnails of modules that have no Blender preview, assembled from the kit parts the way scripts/modgen.evox lays them out
-(ui/kit/th_<n>.png + .spr, n = defs.kindFromIndex). Currently the Docking Hub (8), shown with its shuttle docked.
+(ui/th_<n>.png + .spr, n = defs.kindFromIndex). Currently the Docking Hub (8), shown with its shuttle docked.
 Run with Blender:  blender --background --python tools/gen_module_thumbs.py      (from the project root)
 Transparent background, three-quarter view from above, framed to the bounds, 256 x 168."""
 import bpy, math, mathutils
@@ -52,11 +52,11 @@ def render(n, layout):
     sun = bpy.data.objects.new('sun', bpy.data.lights.new('sun', 'SUN')); scene.collection.objects.link(sun)
     sun.data.energy = 4.0
     sun.rotation_euler = (math.radians(50), math.radians(10), math.radians(30))
-    out = ROOT / 'ui/kit' / ('th_%d.png' % n)
+    out = ROOT / 'ui' / ('th_%d.png' % n)
     scene.render.filepath = str(out)
     bpy.ops.render.render(write_still=True)
-    (ROOT / 'ui/kit' / ('th_%d.spr' % n)).write_text('type = simple\ntop = 0\nbottom = 0\nleft = 0\nright = 0\ntexture = "ui/kit/th_%d.png"\n' % n)
-    (ROOT / 'ui/kit' / ('th_%d.png.meta' % n)).write_text('srgb = true\ncompress = false\nmips = false\n')
+    (ROOT / 'ui' / ('th_%d.spr' % n)).write_text('type = simple\ntop = 0\nbottom = 0\nleft = 0\nright = 0\ntexture = "ui/th_%d.png"\n' % n)
+    (ROOT / 'ui' / ('th_%d.png.meta' % n)).write_text('srgb = true\ncompress = false\nmips = false\n')
     print('THUMB', n)
 
 render(8, HUB)

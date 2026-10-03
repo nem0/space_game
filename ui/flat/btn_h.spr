@@ -1,6 +1,0 @@
-type = patch9
-top = 8
-bottom = 24
-left = 8
-right = 24
-texture = "ui/flat/btn_h.ltct"

@@ -1,6 +1,0 @@
-type = patch9
-top = 8
-bottom = 32
-left = 8
-right = 32
-texture = "ui/flat/panel_flat.ltct"

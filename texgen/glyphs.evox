@@ -1,5 +1,5 @@
 // HUD icon glyphs drawn on a 24 x 24 grid with the vector drawing functions of core:texture_recipe. Port of the glyph functions of the old tools/gen_icons_flat.py.
-// Every glyph takes the canvas and its main colour; the recipes in ui/icons2/*.ltct pick the glyph and colour.
+// Every glyph takes the canvas and its main colour; the recipes in ui/*.ltct pick the glyph and colour.
 import "core:texture_recipe"
 import "core:vec4"
 import "std:math" as math

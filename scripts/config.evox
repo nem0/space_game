@@ -673,8 +673,8 @@ fn workshopJobName(job : i32) : []const u8 {
 // ---- technologies ---------------------------------------------------------------------------------------------------------------------
 // Research benches (RP per game hour) pay for one selected technology at a time. A technology needs its prerequisites researched first, then
 // its cost in RP. It gives a bonus (multipliers below, applied in sim.evox / hud.evox) and/or unlocks buildables (their `unlock` field above holds the id).
-// Ids are 1..TECH_COUNT; four branches (the tree layout is in tools/gen_hud.py): life support and medicine 1..5 and 21..24 and 29, power and thermal 6..10 and 25, salvage and missions 11..15 and 26..28, orbit and station 16..20, 30 and 31.
-// The tree layout (columns, rows) is in tools/gen_hud.py and has to be kept in sync with the prerequisites here.
+// Ids are 1..TECH_COUNT; four branches (the tree layout is in ui/hud.ui): life support and medicine 1..5 and 21..24 and 29, power and thermal 6..10 and 25, salvage and missions 11..15 and 26..28, orbit and station 16..20, 30 and 31.
+// The tree layout (columns, rows) is in ui/hud.ui and has to be kept in sync with the prerequisites here.
 comptime TECH_COUNT = 31;
 const TECH_CO2_SCRUB : f32 = 1.15;        // Atmosphere Control: x CO2 removal
 const TECH_FOOD : f32 = 1.2;              // Hydroponics: x food production

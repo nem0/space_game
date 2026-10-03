@@ -28,7 +28,7 @@ Check the log for `... DONE`; a Python error prints a Traceback. Builders always
 | `tools/parts_lib.py` | the kits' shared code: geometry helpers, habitat hull pieces, docking flange, attachments, `build_kit()`, `Demo` |
 | `tools/build_parts_trim.py`, `tools/build_central_kit.py` | one kit each: the list of pieces and the demo layout |
 | `parts_sheet/`, `parts/`, `central_kit/` | outputs |
-| `earth/`, `earth_atmosphere/`, `tools/build_earth_atmosphere.py` | the planet (unrelated to the kits) |
+| `earth/`, `earth_atmosphere/` | the planet (unrelated to the kits) |
 
 Each kit folder contains one `<piece>.fbx` per piece (UV map `UV0` on the sheet, vertex colour layer `AO` with baked ambient occlusion, tangents exported), `parts_trim.mat`,
 `demo_layout.json` (the demo assembly, Blender coordinates), a `.blend` of the final scene, a Cycles preview png and `manifest.json` (triangle counts, sizes).
