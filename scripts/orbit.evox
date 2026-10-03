@@ -25,6 +25,14 @@ var yaw : f32 = 0.6;
 var pitch : f32 = 0.5;
 var distance : f32 = 22.0;
 var target : Vec3 = undefined;
+// The main menu has its own camera: close to the Central Module, seen from the front left (EVA hatch left, thrusters right), with the station on the
+// right of the screen so the menu fits on the left. The camera eases between it and the player's view when the menu opens or closes.
+const MENU_YAW : f32 = -0.785;
+const MENU_PITCH : f32 = 0.42;
+const MENU_DISTANCE : f32 = 10.5;
+const MENU_TARGET : Vec3 = Vec3 { -2.9, 0.0, -2.9 };   // station-local: left of the station as seen from the menu camera, so the station moves right
+const MENU_BLEND_SECONDS : f32 = 0.9;
+var g_menu_blend : f32 = 1.0;   // 0 = the player's camera, 1 = the menu camera
 var look : bool = false;
 var fwd : bool = false;
 var back : bool = false;
@@ -232,7 +240,16 @@ fn aimRay(mx : f32, my : f32, origin : *Vec3, dir : *Vec3) : bool {
 
 fn update(dt : f32) : void {
 	const cam = g_camera else return;
-	const q = quat.makeQuatFromYaw(yaw) * quat.makeQuatFromPitch(pitch);
+	// ease towards the menu pose while the menu is open, back to the player's view otherwise
+	if st.menu { g_menu_blend = g_menu_blend + dt / MENU_BLEND_SECONDS; } else { g_menu_blend = g_menu_blend - dt / MENU_BLEND_SECONDS; }
+	if g_menu_blend > 1.0 { g_menu_blend = 1.0; }
+	if g_menu_blend < 0.0 { g_menu_blend = 0.0; }
+	const m = g_menu_blend * g_menu_blend * (3.0 - 2.0 * g_menu_blend);
+	const eyaw = yaw + (MENU_YAW - yaw) * m;
+	const epitch = pitch + (MENU_PITCH - pitch) * m;
+	const edist = distance + (MENU_DISTANCE - distance) * m;
+	const etarget = target + (MENU_TARGET - target) * m;
+	const q = quat.makeQuatFromYaw(eyaw) * quat.makeQuatFromPitch(epitch);
 	// pan on the horizontal plane relative to the view direction
 	const f = defs.rotate(q, Vec3 { 0, 0, -1 });
 	const rt = defs.rotate(q, Vec3 { 1, 0, 0 });
@@ -242,10 +259,10 @@ fn update(dt : f32) : void {
 	if right { move = move + Vec3 { rt.x, 0, rt.z }; }
 	if left { move = move - Vec3 { rt.x, 0, rt.z }; }
 	if lengthSquared(move) > 0.001 { target = target + normalizeSafe(move) * (distance * 0.6 * dt); }
-	const pos = target + defs.rotate(q, Vec3 { 0, 0, distance });
+	const pos = etarget + defs.rotate(q, Vec3 { 0, 0, edist });
 	st.cam_right = rt;
 	st.cam_up = defs.rotate(q, Vec3 { 0, 1, 0 });
-	st.cam_dist = distance;
+	st.cam_dist = edist;
 	cam.setPosition(flight.toWorld(pos));
 	if const sky = g_sky { sky.setPosition(flight.toWorld(pos)); }
 	cam.setRotation(flight.frameRotation() * q);
